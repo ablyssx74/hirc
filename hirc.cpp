@@ -50,6 +50,9 @@
 #include <map>
 #include "nlohmann/json.hpp"
 
+namespace AppInfo {
+    static const char* const VERSION_STRING = "HaikuIRC (hirc) v.0.0.5 (Haiku OS)";
+}
 
 using json = nlohmann::json;
 
@@ -65,9 +68,7 @@ struct ServerConfig {
     bool autoReconnect; 
     int32 serverListFontSize = 12;
     int32 chatLogFontSize = 12;
-    int32 userListFontSize = 12;    
-    
- 
+    int32 userListFontSize = 12;
 };
 
 struct Config {
@@ -971,6 +972,9 @@ public:
     HIRCWindow() : BWindow(BRect(100, 100, 900, 600), "Haiku IRC", 
                         B_DOCUMENT_WINDOW, B_QUIT_ON_WINDOW_CLOSE) {
         //@constructor
+        BString windowTitle;
+		windowTitle << "Haiku IRC - " << AppInfo::VERSION_STRING;
+		SetTitle(windowTitle.String());
         
         // 1. Setup Channel Tree View (Left Side)
         fChannelTree = new BOutlineListView("channel_tree");
@@ -1820,11 +1824,36 @@ void ParseAndDisplayIRC(BString line, ServerTreeItem* contextServer) {
             int32 exclamIdx = senderNick.FindFirst("!");
             if (exclamIdx != B_ERROR) senderNick.Truncate(exclamIdx);
             
-            // Extract target channel or nickname from intermediate parameter space
             int32 msgTargetSpace = line.FindFirst(" ");
             BString targetRoom = line;
             if (msgTargetSpace != B_ERROR) targetRoom.Truncate(msgTargetSpace);
             targetRoom.ReplaceAll(" ", "");
+
+            // Handle CTCP VERSION Requests completely network-isolated
+            // Centralized version response handler
+            if (command == "PRIVMSG" && (trailing.StartsWith("\x01VERSION\x01") || trailing.StartsWith("\1VERSION\1"))) {
+                BSecureSocket* activeSocket = nullptr;
+                if (contextServer != nullptr && fServerSockets.count(contextServer) > 0) {
+                    activeSocket = fServerSockets[contextServer];
+                } else {
+                    activeSocket = (contextServer == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                }
+
+                if (activeSocket != nullptr) {
+                    BString versionReply;
+                    // FIXED: Merges your static variable handle cleanly into the IRC protocol payload
+                    versionReply << "NOTICE " << senderNick << " :\x01VERSION " << AppInfo::VERSION_STRING << "\x01\r\n";
+                    
+                    activeSocket->Write(versionReply.String(), versionReply.Length());
+
+                    BString logNotice;
+                    logNotice << "--- [CTCP] Version query from " << senderNick << " answered automatically.\n";
+                    LogToItemBuffer(FindServerLogNode(contextServer), logNotice);
+                }
+                return;
+            }
+
+
             
             // Ensure we have a valid server context pointer passed to this engine block
             if (contextServer == nullptr) {
@@ -2433,8 +2462,7 @@ public:
             case MSG_CONTEXT_ABOUT: {
                 // Formulate the informational message body text
                 BString aboutText;
-                aboutText << "Haiku IRC Client (hirc)\n"
-                          << "Version 0.0.4\n"
+                aboutText <<  AppInfo::VERSION_STRING << "\n" 
                 		  << "By Kris Beazley \"ablyss\"\n"
                 		  << "Copyright 2026 The MIT License\n\n"
 
