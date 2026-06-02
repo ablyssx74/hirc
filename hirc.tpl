@@ -15,8 +15,10 @@ provides {
 	$(NAME) = $(VERSION)-1
 }
 requires {
-	haiku	
-}	
+	haiku
+	nlohmann_json	
+}
+	
 urls {
 	"https://github.com/ablyssx74/hirc"
 }

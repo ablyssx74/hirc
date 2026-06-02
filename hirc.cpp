@@ -66,6 +66,7 @@ struct ServerConfig {
     int32 serverListFontSize = 12;
     int32 chatLogFontSize = 12;
     int32 userListFontSize = 12;    
+    
  
 };
 
@@ -73,9 +74,11 @@ struct Config {
     bool debugEnable = false;
     bool hideStatusMessages = false; 
     std::vector<ServerConfig> servers;
+    std::vector<ServerConfig> customServers; 
     int32 serverListFontSize = 12;
     int32 chatLogFontSize = 12;
     int32 userListFontSize = 12;
+    std::string quitMessage = "Haiku IRC Client (hirc)"; 
 } cfg;
 
 int selectedConfig = 0;
@@ -92,13 +95,12 @@ void save_config() {
     ensure_config_dir();
     json j;
     j["debugEnable"] = cfg.debugEnable;
-
-    
-    
     j["serverListFontSize"] = cfg.serverListFontSize;
     j["chatLogFontSize"] = cfg.chatLogFontSize;
     j["userListFontSize"] = cfg.userListFontSize;
+    j["quitMessage"] = cfg.quitMessage;
     
+    // 1. Save standard/default servers
     json serverArray = json::array();
     for (const auto& srv : cfg.servers) {
         json s;        
@@ -119,6 +121,27 @@ void save_config() {
     }
     j["servers"] = serverArray;
 
+    // 2. Save custom servers into their own isolated JSON array
+    json customServerArray = json::array();
+    for (const auto& srv : cfg.customServers) {
+        json s;        
+        s["name"] = srv.name;
+        s["host"] = srv.host;
+        s["port"] = srv.port;
+        s["nick"] = srv.nick;
+        s["pass"] = srv.pass;
+        s["autoConnect"] = srv.autoConnect; 
+        s["autoReconnect"] = srv.autoReconnect;
+        s["hideStatusMessages"] = srv.hideStatusMessages; 
+        json ajArray = json::array();
+        for (const auto& chan : srv.autojoin) {
+            ajArray.push_back(chan);
+        }
+        s["autojoin"] = ajArray;
+        customServerArray.push_back(s);
+    }
+    j["custom_servers"] = customServerArray; // <-- Distinct JSON key
+
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
         path.Append("hirc/hircConfig.txt");
@@ -130,14 +153,15 @@ void save_config() {
     }
 }
 
+
 void load_config() {
     ensure_config_dir();
     cfg.debugEnable = false;
     cfg.hideStatusMessages = false;     
  
-    // Empty the global array vector
     cfg.servers.clear(); 
-
+    cfg.customServers.clear();
+	
     BPath path;
     bool mustSaveDefaults = false;
 
@@ -147,12 +171,13 @@ void load_config() {
         if (infile.is_open()) {
             try {
                 json j = json::parse(infile);
-                
+                cfg.quitMessage = j.value("quitMessage", "Haiku HIRC Client");
                 cfg.debugEnable = j.value("debugEnable", false);             
                 cfg.serverListFontSize = j.value("serverListFontSize", (int32)12);
-    			cfg.chatLogFontSize    = j.value("chatLogFontSize", (int32)12);
-    			
-    			cfg.userListFontSize   = j.value("userListFontSize", (int32)12);  
+                cfg.chatLogFontSize    = j.value("chatLogFontSize", (int32)12);
+                cfg.userListFontSize   = j.value("userListFontSize", (int32)12);  
+                
+                // Parse standard servers array
                 if (j.contains("servers") && j["servers"].is_array()) {
                     for (const auto& s : j["servers"]) {
                         ServerConfig srv;
@@ -169,17 +194,28 @@ void load_config() {
                                 srv.autojoin.push_back(chan.get<std::string>());
                             }
                         }
-                        
-                        bool isDuplicate = false;
-                        for (const auto& existing : cfg.servers) {
-                            if (existing.host == srv.host && existing.name == srv.name) {
-                                isDuplicate = true;
-                                break;
+                        cfg.servers.push_back(srv);
+                    }
+                }
+
+                // Parse the custom servers array safely
+                if (j.contains("custom_servers") && j["custom_servers"].is_array()) {
+                    for (const auto& s : j["custom_servers"]) {
+                        ServerConfig srv;
+                        srv.name = s.value("name", "Custom Server");
+                        srv.host = s.value("host", "127.0.0.1");
+                        srv.port = s.value("port", (uint16)6697);
+                        srv.nick = s.value("nick", "HaikuUser");
+                        srv.pass = s.value("pass", "");
+                        srv.autoReconnect = s.value("autoReconnect", false); 
+                        srv.autoConnect = s.value("autoConnect", false); 
+                        srv.hideStatusMessages = s.value("hideStatusMessages", false);
+                        if (s.contains("autojoin") && s["autojoin"].is_array()) {
+                            for (const auto& chan : s["autojoin"]) {
+                                srv.autojoin.push_back(chan.get<std::string>());
                             }
                         }
-                        if (!isDuplicate) {
-                            cfg.servers.push_back(srv);
-                        }
+                        cfg.customServers.push_back(srv);
                     }
                 }
             } catch(...) {
@@ -193,18 +229,11 @@ void load_config() {
 
     if (mustSaveDefaults || cfg.servers.empty()) {
         cfg.servers.clear();        
-        
-        // 1. Seed the random number engine using the high-precision system clock
         srand(static_cast<unsigned int>(real_time_clock_usecs()));
-        
-        // 2. Generate a random 4-digit numeric suffix between 1000 and 9999
         int randomSuffix = 1000 + (rand() % 9000);
-        
-        // 3. Assemble the dynamic nickname string parameter
         BString dynamicNick;
         dynamicNick << "HaikuIRCUser" << randomSuffix;
 
-        // 4. Assign the generated unique nickname back to your server fallback blocks
         ServerConfig libera = {"Libera Chat", "irc.libera.chat", 6697, dynamicNick.String(), "", {"#ubuntu", "#linux"}};
         ServerConfig oftc   = {"OFTC", "irc.oftc.net", 6697, dynamicNick.String(), "", {"#haiku"}};
         
@@ -212,8 +241,8 @@ void load_config() {
         cfg.servers.push_back(oftc);
         save_config(); 
     }
-
 }
+
 
 
 
@@ -241,12 +270,109 @@ enum {
     MSG_CONFIG_CANCEL = 'cfcn',
 	MSG_CONTEXT_CONFIGURE_SERVER = 'mccs',
 	MSG_SAVE_CONFIG_FILE = 'mscf',
+	MSG_CONNECT_CUSTOM_SERVER = 'cncs', 
+	MSG_ADD_CUSTOM_SERVER_SUBMIT = 'acss',
 };
 
 
 
 
 
+
+class AddServerWindow : public BWindow {
+public:
+    AddServerWindow(BWindow* targetWindow) 
+        : BWindow(BRect(0, 0, 350, 250), "Add Custom Server", 
+                  B_TITLED_WINDOW, B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS) {
+        
+        fTarget = targetWindow;
+
+        // 1. Initialize modern, auto-aligning input layout fields
+        fNameField = new BTextControl("name", "Network Name:", "My IRC Server", nullptr);
+        fHostField = new BTextControl("host", "Server Host:", "://example.com", nullptr);
+        fPortField = new BTextControl("port", "Port:", "6697", nullptr);
+        fNickField = new BTextControl("nick", "Nickname:", "HaikuUser", nullptr);
+        fPassField = new BTextControl("pass", "Password (Optional):", "", nullptr);
+        
+        // Hide password characters automatically
+        fPassField->TextView()->HideTyping(true);
+
+        // 2. Control Form Buttons
+        fCancelButton = new BButton("cancel", "Cancel", new BMessage(B_QUIT_REQUESTED));
+        fSaveButton   = new BButton("save", "Add Server", new BMessage(MSG_ADD_CUSTOM_SERVER_SUBMIT));
+        
+        // Set the save button as the default highlight action on hitting 'Enter' key
+        fSaveButton->MakeDefault(true);
+
+        // 3. Build UI Architecture via Group Layouts
+        BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
+            .SetInsets(12)
+            .AddGrid(5.0f, 5.0f) // Vertically aligns the colons of the text inputs perfectly
+                .Add(fNameField->CreateLabelLayoutItem(), 0, 0)
+                .Add(fNameField->CreateTextViewLayoutItem(), 1, 0)
+                
+                .Add(fHostField->CreateLabelLayoutItem(), 0, 1)
+                .Add(fHostField->CreateTextViewLayoutItem(), 1, 1)
+                
+                .Add(fPortField->CreateLabelLayoutItem(), 0, 2)
+                .Add(fPortField->CreateTextViewLayoutItem(), 1, 2)
+                
+                .Add(fNickField->CreateLabelLayoutItem(), 0, 3)
+                .Add(fNickField->CreateTextViewLayoutItem(), 1, 3)
+                
+                .Add(fPassField->CreateLabelLayoutItem(), 0, 4)
+                .Add(fPassField->CreateTextViewLayoutItem(), 1, 4)
+            .End()
+            .AddGlue() // Pushes inputs up and action control buttons down
+            .AddGroup(B_HORIZONTAL, 10)
+                .AddGlue() // Right-aligns buttons cleanly
+                .Add(fCancelButton)
+                .Add(fSaveButton)
+            .End();
+
+        // 4. Center this modal dynamically directly over the main application
+        CenterIn(targetWindow->Frame());
+    }
+
+    void MessageReceived(BMessage* message) override {
+        switch (message->what) {
+            case MSG_ADD_CUSTOM_SERVER_SUBMIT: {
+                // Perform quick sanitization constraints check
+                if (strlen(fNameField->Text()) == 0 || strlen(fHostField->Text()) == 0) {
+                    return; 
+                }
+
+                // Pack everything securely into a payload carrier message
+                BMessage reply(MSG_ADD_CUSTOM_SERVER_SUBMIT);
+                reply.AddString("name", fNameField->Text());
+                reply.AddString("host", fHostField->Text());
+                reply.AddInt32("port", atoi(fPortField->Text()));
+                reply.AddString("nick", fNickField->Text());
+                reply.AddString("pass", fPassField->Text());
+
+                // Post asynchronous message back to the main UI frame
+                fTarget->PostMessage(&reply);
+                
+                // Close dialog
+                PostMessage(B_QUIT_REQUESTED);
+                break;
+            }
+            default:
+                BWindow::MessageReceived(message);
+                break;
+        }
+    }
+
+private:
+    BWindow*       fTarget;
+    BTextControl*  fNameField;
+    BTextControl*  fHostField;
+    BTextControl*  fPortField;
+    BTextControl*  fNickField;
+    BTextControl*  fPassField;
+    BButton*       fCancelButton;
+    BButton*       fSaveButton;
+};
 
 
 
@@ -256,10 +382,12 @@ class ChannelRowItem : public BStringItem {
 public:
     ChannelRowItem(const char* channel, const char* users, const char* topic)
         : BStringItem(channel), fChannel(channel), fUsers(users), fTopic(topic) {
+        fRawUserCount = atoi(users); 	
         fUsers << " users";
     }
 
     BString GetChannelName() const { return fChannel; }
+    int32   GetUserCount() const { return fRawUserCount; } 
 
     void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
         owner->PushState();
@@ -274,11 +402,14 @@ public:
             owner->FillRect(itemRect, B_SOLID_LOW);
         }
 
-        owner->SetFont(be_plain_font);
+        // UPDATED: Read the true runtime font scale from the parent view context container
+        BFont dynamicListFont;
+        owner->GetFont(&dynamicListFont);
+        owner->SetFont(&dynamicListFont);
         
         // FIX #2: Correct native way to compute the baseline Y coordinate using GetFontHeight()
         font_height fh;
-        owner->GetFontHeight(&fh);
+        dynamicListFont.GetHeight(&fh); // Compute baseline using the dynamic font metrics
         float baselineY = itemRect.bottom - (fh.descent + fh.leading);
 
         // Column A: Channel Name (Starts at pixel 10)
@@ -309,7 +440,30 @@ private:
     BString fChannel;
     BString fUsers;
     BString fTopic;
+    int32   fRawUserCount;
 };
+
+
+// Sorts items so that the highest user count bubbles up to the top
+// Use const void* to match the native BListView API
+static int SortChannelsByUsers(const void* first, const void* second) {
+    // 1. Cast the generic raw pointers to constant BListItem pointers safely
+    const BListItem* itemPtrA = *static_cast<const BListItem* const*>(first);
+    const BListItem* itemPtrB = *static_cast<const BListItem* const*>(second);
+
+    // 2. Perform dynamic_cast checks to verify these are indeed ChannelRowItems
+    const ChannelRowItem* itemA = dynamic_cast<const ChannelRowItem*>(itemPtrA);
+    const ChannelRowItem* itemB = dynamic_cast<const ChannelRowItem*>(itemPtrB);
+
+    if (itemA == nullptr || itemB == nullptr) return 0;
+
+    // Descending order sort (highest count first)
+    if (itemA->GetUserCount() > itemB->GetUserCount()) return -1;
+    if (itemA->GetUserCount() < itemB->GetUserCount()) return 1;
+    return 0;
+}
+
+
 
 // 2. DECLARE THE WINDOW
 class IRCChannelListWindow : public BWindow {
@@ -334,6 +488,10 @@ public:
             fSocket->Write("LIST\r\n", 6);
         }
     }
+
+    // NEW: Public getter required by the '322' protocol parser block
+    // Ensures incoming channel data packages route exclusively to their true parent socket
+    BSecureSocket* GetTargetSocket() const { return fSocket; }
 
     void DispatchMessage(BMessage* message, BHandler* handler) override {
         if (message->what == B_MOUSE_DOWN && handler == fListView) {
@@ -363,19 +521,24 @@ public:
 
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
-            case MSG_ADD_LIST_ROW: {
-                const char* channelName;
-                const char* userCount;
-                const char* topic;
-                
-                if (message->FindString("channel", &channelName) == B_OK &&
-                    message->FindString("users", &userCount) == B_OK &&
-                    message->FindString("topic", &topic) == B_OK) {
-                    
-                    fListView->AddItem(new ChannelRowItem(channelName, userCount, topic));
-                }
-                break;
-            }
+ 
+ 		   case MSG_ADD_LIST_ROW: {
+        		const char* channelName;
+        		const char* userCount;
+        		const char* topic;
+        
+        		if (message->FindString("channel", &channelName) == B_OK &&
+            		message->FindString("users", &userCount) == B_OK &&
+            		message->FindString("topic", &topic) == B_OK) {
+            
+            		fListView->AddItem(new ChannelRowItem(channelName, userCount, topic));
+            
+            		// NEW SORT TRIGGER: Automatically re-sorts the rows live on screen!
+            		fListView->SortItems(SortChannelsByUsers); 
+        		}
+        		break;
+    		}
+
 
             case 'join': {
                 int32 selectedIdx = fListView->CurrentSelection();
@@ -400,14 +563,21 @@ public:
     }
 
     void Quit() override {
-        BMessage notification('cldc');
+        // FIXED: Loop and explicitly free all custom ChannelRowItem allocations 
+        // out of the heap pool to prevent huge memory leaks when closing long directory list passes
+        while (fListView->CountItems() > 0) {
+            BListItem* item = fListView->RemoveItem((int32)0);
+            delete item;
+        }
+
+        BMessage notification('cldc'); // Notify parent window fActiveListWindow is dead
         if (fOwnerWindow) fOwnerWindow->PostMessage(&notification);
         BWindow::Quit();
     }
 
 private:
-    BWindow*   fOwnerWindow;
-    BListView* fListView;
+    BWindow*       fOwnerWindow;
+    BListView*     fListView;
     BSecureSocket* fSocket;
 };
 
@@ -415,17 +585,29 @@ private:
 
 class ChannelTreeItem : public BStringItem {
 public:
-    // Accept the configuration database index pointer reference on creation
-    ChannelTreeItem(const char* text, size_t serverIndex) 
-        : BStringItem(text), fServerIndex(serverIndex), fHasUnread(false), fAutoJoin(false) {
+    // UPDATED: Accept an additional bool isCustom parameter (defaults to false)
+    ChannelTreeItem(const char* text, size_t serverIndex, bool isCustom = false) 
+        : BStringItem(text), fServerIndex(serverIndex), fIsCustom(isCustom), fHasUnread(false), fAutoJoin(false) {
         
-        // Check our loaded global vector cache profiles to set the initial state flag
         BString chanName(text);
-        if (fServerIndex < cfg.servers.size()) {
-            for (const auto& chan : cfg.servers[fServerIndex].autojoin) {
-                if (chanName.ICompare(chan.c_str()) == 0) {
-                    fAutoJoin = true;
-                    break;
+        
+        // UPDATED: Route the initial autojoin check to the correct config vector array
+        if (fIsCustom) {
+            if (fServerIndex < cfg.customServers.size()) {
+                for (const auto& chan : cfg.customServers[fServerIndex].autojoin) {
+                    if (chanName.ICompare(chan.c_str()) == 0) {
+                        fAutoJoin = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            if (fServerIndex < cfg.servers.size()) {
+                for (const auto& chan : cfg.servers[fServerIndex].autojoin) {
+                    if (chanName.ICompare(chan.c_str()) == 0) {
+                        fAutoJoin = true;
+                        break;
+                    }
                 }
             }
         }
@@ -437,10 +619,10 @@ public:
     void SetAutoJoin(bool autoJoin) { fAutoJoin = autoJoin; }
     bool IsAutoJoin() const { return fAutoJoin; }
     size_t GetServerIndex() const { return fServerIndex; }
+    bool   IsCustom() const { return fIsCustom; } // NEW: Public getter to query custom flag
 
     // Override the native drawing framework loop
     void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
-        // Safe fallback cleanup context setup
         owner->PushState();
 
         if (IsSelected()) {
@@ -453,11 +635,9 @@ public:
             owner->FillRect(itemRect, B_SOLID_LOW);
         }
 
-        // 1. DYNAMIC FONT: Read the current size from the parent view container
         BFont dynamicFont;
         owner->GetFont(&dynamicFont);
 
-        // DYNAMIC FONT SWITCH: Apply bold formatting face rules manually on our scale
         if (fHasUnread && !IsSelected()) {
             dynamicFont.SetFace(B_BOLD_FACE);
             owner->SetHighColor(ui_color(B_LINK_TEXT_COLOR)); 
@@ -466,15 +646,12 @@ public:
         }
         owner->SetFont(&dynamicFont);
 
-        // 2. DYNAMIC SPACING FIX: Calculate vertical baseline metrics to avoid overlapping
         font_height fh;
         dynamicFont.GetHeight(&fh);
         float textBaseline = itemRect.top + fh.ascent + (itemRect.Height() - (fh.ascent + fh.descent + fh.leading)) / 2.0f;
         
-        // Indent channels to the right (e.g., 20 pixels) to distinguish them under server nodes
         owner->MovePenTo(itemRect.left + 20, textBaseline);
         
-        // Rebuild dynamic text string to add trailing tag helper
         BString displayString = Text();
         if (fAutoJoin) displayString << " [A]";
         owner->DrawString(displayString.String());
@@ -482,28 +659,84 @@ public:
         owner->PopState();
     }
 
-
 private:
     size_t fServerIndex;
-    bool fHasUnread;
-    bool fAutoJoin;
+    bool   fIsCustom; // NEW: Track vector classification path inside instance memory
+    bool   fHasUnread;
+    bool   fAutoJoin;
 };
 
 
 class ServerTreeItem : public BStringItem {
 public:
-    ServerTreeItem(const char* text, size_t configIndex, bool isChannel = false) 
-        : BStringItem(text), fConfigIndex(configIndex), fIsChannel(isChannel) {
-        fAutoConnect = cfg.servers[fConfigIndex].autoConnect;
-        fAutoReconnect = cfg.servers[fConfigIndex].autoReconnect;
+    ServerTreeItem(const char* text, size_t configIndex, bool isChannel = false, bool isCustom = false) 
+        : BStringItem(text), fConfigIndex(configIndex), fIsChannel(isChannel), fIsCustom(isCustom) {
+        
+        // Safety bounds check to pull structural configs securely
+        if (fIsCustom) {
+            if (fConfigIndex < cfg.customServers.size()) {
+                fAutoConnect = cfg.customServers[fConfigIndex].autoConnect;
+                fAutoReconnect = cfg.customServers[fConfigIndex].autoReconnect;
+                fHideStatus = cfg.customServers[fConfigIndex].hideStatusMessages;
+            } else {
+                fAutoConnect = false;
+                fAutoReconnect = false;
+            }
+        } else {
+            if (fConfigIndex < cfg.servers.size()) {
+                fAutoConnect = cfg.servers[fConfigIndex].autoConnect;
+                fAutoReconnect = cfg.servers[fConfigIndex].autoReconnect;
+                fHideStatus = cfg.servers[fConfigIndex].hideStatusMessages;
+            } else {
+                fAutoConnect = false;
+                fAutoReconnect = false;
+            }
+        }
     }
         
-    BString GetHost() const { return BString(cfg.servers[fConfigIndex].host.c_str()); }
-    uint16  GetPort() const { return cfg.servers[fConfigIndex].port; }
-    BString GetNick() const { return BString(cfg.servers[fConfigIndex].nick.c_str()); }
-    BString GetPass() const { return BString(cfg.servers[fConfigIndex].pass.c_str()); }
-    size_t  GetIndex() const { return fConfigIndex; }
-    std::vector<std::string> GetAutojoin() const { return cfg.servers[fConfigIndex].autojoin; }
+    BString GetHost() const { 
+        if (fIsCustom && fConfigIndex < cfg.customServers.size())
+            return BString(cfg.customServers[fConfigIndex].host.c_str());
+        if (!fIsCustom && fConfigIndex < cfg.servers.size())
+            return BString(cfg.servers[fConfigIndex].host.c_str());
+        return BString("");
+    }
+
+    uint16 GetPort() const { 
+        if (fIsCustom && fConfigIndex < cfg.customServers.size())
+            return cfg.customServers[fConfigIndex].port;
+        if (!fIsCustom && fConfigIndex < cfg.servers.size())
+            return cfg.servers[fConfigIndex].port;
+        return 6697;
+    }
+
+    BString GetNick() const { 
+        if (fIsCustom && fConfigIndex < cfg.customServers.size())
+            return BString(cfg.customServers[fConfigIndex].nick.c_str());
+        if (!fIsCustom && fConfigIndex < cfg.servers.size())
+            return BString(cfg.servers[fConfigIndex].nick.c_str());
+        return BString("HaikuUser");
+    }
+
+    BString GetPass() const { 
+        if (fIsCustom && fConfigIndex < cfg.customServers.size())
+            return BString(cfg.customServers[fConfigIndex].pass.c_str());
+        if (!fIsCustom && fConfigIndex < cfg.servers.size())
+            return BString(cfg.servers[fConfigIndex].pass.c_str());
+        return BString("");
+    }
+
+    std::vector<std::string> GetAutojoin() const { 
+        if (fIsCustom && fConfigIndex < cfg.customServers.size())
+            return cfg.customServers[fConfigIndex].autojoin;
+        if (!fIsCustom && fConfigIndex < cfg.servers.size())
+            return cfg.servers[fConfigIndex].autojoin;
+        return std::vector<std::string>();
+    }
+
+    size_t GetIndex() const { return fConfigIndex; }
+    bool   IsCustom() const { return fIsCustom; }
+    bool   IsChannel() const { return fIsChannel; }
     
     bool IsAutoConnect() const { return fAutoConnect; }
     void SetAutoConnect(bool autoConnect) { fAutoConnect = autoConnect; }
@@ -511,8 +744,8 @@ public:
     void SetAutoReconnect(bool autoReconnect) { fAutoReconnect = autoReconnect; }
     bool IsHideStatus() const { return fHideStatus; }
     void SetHideStatus(bool hide) { fHideStatus = hide; }
-    bool IsChannel() const { return fIsChannel; }
-
+	void SetIndex(size_t idx) { fConfigIndex = idx; }
+	
     // FIXED: DrawItem that centers text and indents channels perfectly at any font size
     void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
         owner->PushState();
@@ -527,17 +760,14 @@ public:
             owner->FillRect(itemRect, B_SOLID_LOW);
         }
 
-        // Dynamically get the font scaling configuration applied to the parent tree
         BFont dynamicFont;
         owner->GetFont(&dynamicFont);
         owner->SetFont(&dynamicFont);
 
-        // Dynamically calculate the vertical baseline using precise font metrics
         font_height fh;
         dynamicFont.GetHeight(&fh);
         float textBaseline = itemRect.top + fh.ascent + (itemRect.Height() - (fh.ascent + fh.descent + fh.leading)) / 2.0f;
         
-        // INDENT CHANNELS: Add padding to the left if this item is a channel node
         float leftPadding = fIsChannel ? 24.0f : 4.0f;
         owner->MovePenTo(itemRect.left + leftPadding, textBaseline);
         
@@ -556,7 +786,8 @@ private:
     bool fAutoConnect;
     bool fAutoReconnect;
     bool fHideStatus = false;
-    bool fIsChannel; // Flag to separate drawing rules
+    bool fIsChannel; 
+    bool fIsCustom; // <-- Tracks whether this item references custom array configs
 };
 
 
@@ -567,18 +798,23 @@ class ServerConfigWindow : public BWindow {
 public:
     virtual ~ServerConfigWindow() {}
 
-    ServerConfigWindow(BWindow* parent, ServerTreeItem* item, size_t serverIdx)
-        : BWindow(BRect(0, 0, 350, 320), "Server Properties", B_MODAL_WINDOW_LOOK, 
-                  B_MODAL_SUBSET_WINDOW_FEEL, B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
+    // UPDATED: Added bool isCustom = false parameter to the constructor signature
+    ServerConfigWindow(BWindow* parent, ServerTreeItem* item, size_t serverIdx, bool isCustom = false)
+        // Pass an empty dummy size; B_AUTO_UPDATE_SIZE_LIMITS will force it to fit perfectly!
+        : BWindow(BRect(0, 0, 1, 1), "Server Properties", B_MODAL_WINDOW_LOOK, 
+                  B_MODAL_SUBSET_WINDOW_FEEL, B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS) {
+
         
         fParentWindow = parent;
         fItem = item;
         fServerIdx = serverIdx;
+        fIsCustom = isCustom; // NEW: Track vector classification type inside instance memory
 
         AddToSubset(parent);
         CenterIn(parent->Frame());
 
-        ServerConfig& srv = cfg.servers[fServerIdx];
+        // Dynamic config lookup helper prevents code duplication
+        ServerConfig& srv = GetActiveConfig();
 
         fNickInput = new BTextControl("nick", "Nickname:", srv.nick.c_str(), nullptr);
         fPassInput = new BTextControl("pass", "Password:", srv.pass.c_str(), nullptr);
@@ -587,8 +823,6 @@ public:
         fServerListFontMenu = CreateFontMenu("Server List Font:", cfg.serverListFontSize);
         fChatLogFontMenu    = CreateFontMenu("Chat Log Font:", cfg.chatLogFontSize);
         fUserListFontMenu   = CreateFontMenu("User List Font:", cfg.userListFontSize);
-
-// Inside ServerConfigWindow Constructor:
 
         fAutoConnectCheck = new BCheckBox("autoconnect", "Automatically connect at startup", nullptr);
         fAutoConnectCheck->SetValue(srv.autoConnect ? B_CONTROL_ON : B_CONTROL_OFF);
@@ -599,81 +833,83 @@ public:
         fDebugEnableCheck = new BCheckBox("debug", "Enable low-level socket engine logs", nullptr);
         fDebugEnableCheck->SetValue(cfg.debugEnable ? B_CONTROL_ON : B_CONTROL_OFF);
 
-        // NEW CODE: Instantiate the hide status check control button
         fHideStatusCheck = new BCheckBox("hidestatus", "Hide channel status messages (Joins/Parts/Quits)", nullptr);
         fHideStatusCheck->SetValue(srv.hideStatusMessages ? B_CONTROL_ON : B_CONTROL_OFF);
 
         BButton* cancelBtn = new BButton("cancel", "Cancel", new BMessage('cfcn'));
         BButton* saveBtn = new BButton("save", "Save", new BMessage('cfsv'));
         saveBtn->MakeDefault(true);
+        
+		fQuitInput = new BTextControl("quitmsg", "QUIT Message:", cfg.quitMessage.c_str(), nullptr);
+		
+		BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
+    		.SetInsets(15)
+    		.AddGrid(5.0f, 5.0f)
+        	.Add(fNickInput->CreateLabelLayoutItem(), 0, 0)
+        	.Add(fNickInput->CreateTextViewLayoutItem(), 1, 0)
+        	.Add(fPassInput->CreateLabelLayoutItem(), 0, 1)
+        	.Add(fPassInput->CreateTextViewLayoutItem(), 1, 1)
+        
+        	// Renders the configuration input entry row neatly aligned
+        	.Add(fQuitInput->CreateLabelLayoutItem(), 0, 2)
+        	.Add(fQuitInput->CreateTextViewLayoutItem(), 1, 2)        
 
-        // Update the layout builder chain to include the new toggle line below the font dropdown selectors
-        BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
-            .SetInsets(15)
-            .AddGrid(5.0f, 5.0f)
-                .Add(fNickInput->CreateLabelLayoutItem(), 0, 0)
-                .Add(fNickInput->CreateTextViewLayoutItem(), 1, 0)
-                .Add(fPassInput->CreateLabelLayoutItem(), 0, 1)
-                .Add(fPassInput->CreateTextViewLayoutItem(), 1, 1)
-                .Add(fServerListFontMenu->CreateLabelLayoutItem(), 0, 2)
-                .Add(fServerListFontMenu->CreateMenuBarLayoutItem(), 1, 2)
-                .Add(fChatLogFontMenu->CreateLabelLayoutItem(), 0, 3)
-                .Add(fChatLogFontMenu->CreateMenuBarLayoutItem(), 1, 3)
-                .Add(fUserListFontMenu->CreateLabelLayoutItem(), 0, 4)
-                .Add(fUserListFontMenu->CreateMenuBarLayoutItem(), 1, 4)
-            .End()
+        	.Add(fServerListFontMenu->CreateLabelLayoutItem(), 0, 3)
+        	.Add(fServerListFontMenu->CreateMenuBarLayoutItem(), 1, 3)
+        	.Add(fChatLogFontMenu->CreateLabelLayoutItem(), 0, 4)
+        	.Add(fChatLogFontMenu->CreateMenuBarLayoutItem(), 1, 4)
+        	.Add(fUserListFontMenu->CreateLabelLayoutItem(), 0, 5)
+        	.Add(fUserListFontMenu->CreateMenuBarLayoutItem(), 1, 5)
+    	.End()
             .Add(fAutoConnectCheck)
             .Add(fAutoReconnectCheck)
-            .Add(fHideStatusCheck)      // <-- NEW: Render checkbox inline horizontally
-            // .Add(fDebugEnableCheck)
+            .Add(fHideStatusCheck)      
             .AddGlue()
             .AddGroup(B_HORIZONTAL, 10)
                 .AddGlue()
                 .Add(cancelBtn)
                 .Add(saveBtn)
             .End();
-
     }
 
-    // Moving the implementation body inline here resolves the linker vtable error
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
             case 'cfcn':
                 Quit();
                 break;
                 
-	        case 'cfsv': {
-            	ServerConfig& srv = cfg.servers[fServerIdx];
-            	srv.nick = fNickInput->Text();
-            	srv.pass = fPassInput->Text();
-            	srv.autoConnect = (fAutoConnectCheck->Value() == B_CONTROL_ON);
-            	srv.autoReconnect = (fAutoReconnectCheck->Value() == B_CONTROL_ON);
-            	cfg.debugEnable = (fDebugEnableCheck->Value() == B_CONTROL_ON);
+            case 'cfsv': {
+                // Dynamically route data saving to the correct active vector configuration structure 
+                ServerConfig& srv = GetActiveConfig();
+                srv.nick = fNickInput->Text();
+                srv.pass = fPassInput->Text();
+                srv.autoConnect = (fAutoConnectCheck->Value() == B_CONTROL_ON);
+                srv.autoReconnect = (fAutoReconnectCheck->Value() == B_CONTROL_ON);
+                cfg.debugEnable = (fDebugEnableCheck->Value() == B_CONTROL_ON);
+				cfg.quitMessage = fQuitInput->Text();
+                srv.hideStatusMessages = (fHideStatusCheck->Value() == B_CONTROL_ON);
 
-            	srv.hideStatusMessages = (fHideStatusCheck->Value() == B_CONTROL_ON);
+                BMenuItem* item = fServerListFontMenu->Menu()->FindMarked();
+                if (item && item->Message()) cfg.serverListFontSize = item->Message()->FindInt32("size");
 
-            	BMenuItem* item = fServerListFontMenu->Menu()->FindMarked();
-            	if (item && item->Message()) cfg.serverListFontSize = item->Message()->FindInt32("size");
+                item = fChatLogFontMenu->Menu()->FindMarked();
+                if (item && item->Message()) cfg.chatLogFontSize = item->Message()->FindInt32("size");
 
-            	item = fChatLogFontMenu->Menu()->FindMarked();
-            	if (item && item->Message()) cfg.chatLogFontSize = item->Message()->FindInt32("size");
+                item = fUserListFontMenu->Menu()->FindMarked();
+                if (item && item->Message()) cfg.userListFontSize = item->Message()->FindInt32("size");
 
-            	item = fUserListFontMenu->Menu()->FindMarked();
-            	if (item && item->Message()) cfg.userListFontSize = item->Message()->FindInt32("size");
+                if (fItem != nullptr) {
+                    fItem->SetAutoConnect(srv.autoConnect);
+                    fItem->SetAutoReconnect(srv.autoReconnect);
+                    fItem->SetHideStatus(srv.hideStatusMessages);
+                }
 
-            	if (fItem != nullptr) {
-                	fItem->SetAutoConnect(srv.autoConnect);
-                	fItem->SetAutoReconnect(srv.autoReconnect);
-                
-                	fItem->SetHideStatus(srv.hideStatusMessages);
-            	}
-
-            	BMessage updateNotify('mscf'); 
-            	if (fParentWindow) fParentWindow->PostMessage(&updateNotify);
+                BMessage updateNotify('mscf'); 
+                if (fParentWindow) fParentWindow->PostMessage(&updateNotify);
             
-            	Quit();
-            	break;
-        	}
+                Quit();
+                break;
+            }
 
             default:
                 BWindow::MessageReceived(message);
@@ -685,16 +921,26 @@ private:
     BWindow*            fParentWindow;
     ServerTreeItem*     fItem;
     size_t              fServerIdx;
-
+    bool                fIsCustom; 
+	BTextControl* 		fQuitInput;
     BTextControl*       fNickInput;
     BTextControl*       fPassInput;
     BCheckBox*          fAutoConnectCheck;
     BCheckBox*          fAutoReconnectCheck;
     BCheckBox*          fDebugEnableCheck;
-	BCheckBox*          fHideStatusCheck;
+    BCheckBox*          fHideStatusCheck;
     BMenuField*         fServerListFontMenu;
     BMenuField*         fChatLogFontMenu;
     BMenuField*         fUserListFontMenu;
+	
+    // NEW: Safe helper function to fetch correct active reference target safely
+    ServerConfig& GetActiveConfig() {
+        if (fIsCustom && fServerIdx < cfg.customServers.size()) {
+            return cfg.customServers[fServerIdx];
+        }
+        // Fallback or standard hardcoded element reference loop block
+        return cfg.servers[fServerIdx];
+    }
 
     BMenuField* CreateFontMenu(const char* label, int32 currentSize) {
         BPopUpMenu* menu = new BPopUpMenu(label);
@@ -730,14 +976,18 @@ public:
         fChannelTree = new BOutlineListView("channel_tree");
         BScrollView* channelScroll = new BScrollView("scroll_channels", fChannelTree, 0, false, true);
         
+        // NEW: Create an Add Server button pinned to the sidebar
+        BButton* addServerButton = new BButton("add_srv_btn", "Add Server…", new BMessage('adcs')); // 'adcs' = Add Custom Server
+        
         // 2. Load Config and Populate Servers Tree ONCE
         load_config(); 
         
-        fLiberaNode = nullptr;
-        fOftcNode = nullptr;
+        // fLiberaNode = nullptr;
+        // fOftcNode = nullptr;
 
+        // Loop A: Populate hardcoded default servers (Libera / OFTC)
         for (size_t i = 0; i < cfg.servers.size(); i++) {
-            ServerTreeItem* serverNode = new ServerTreeItem(cfg.servers[i].name.c_str(), i);
+            ServerTreeItem* serverNode = new ServerTreeItem(cfg.servers[i].name.c_str(), i, false, false);
             
             // Copy the loaded configuration values straight onto the UI tree items on boot!
             serverNode->SetHideStatus(cfg.servers[i].hideStatusMessages);
@@ -747,6 +997,17 @@ public:
             // Map structural lookups to our class reference tracking pointers
             if (i == 0) fLiberaNode = serverNode;
             if (i == 1) fOftcNode = serverNode;
+        }
+
+        // Loop B: Populate user-defined custom servers dynamically
+        for (size_t i = 0; i < cfg.customServers.size(); i++) {
+            ServerTreeItem* customNode = new ServerTreeItem(cfg.customServers[i].name.c_str(), i, false, true);
+            
+            // Copy configuration values onto custom items
+            customNode->SetHideStatus(cfg.customServers[i].hideStatusMessages);
+            
+            // Add right into the exact same tree view!
+            fChannelTree->AddItem(customNode);
         }
 
         
@@ -809,10 +1070,13 @@ public:
         BLayoutBuilder::Group<>(this, B_VERTICAL, 5)
             .SetInsets(10)
             .Add(mainSplitter, 1.0) // Splitter stretches to fill the main window space
-            .AddGroup(B_HORIZONTAL, 5, 0.0) // Bottom user text entry bar row remains fixed
-                .Add(fInputControl, 1.0)
-                .Add(fConnectButton, 0.0)
+            .AddGroup(B_HORIZONTAL, 5, 0.0) // Bottom bar remains fixed
+                .Add(addServerButton, 0.0)   // Pins the "Add Server..." button on the far left
+                // REMOVED GLUE: Let the input control weight do the expansion work natively!
+                .Add(fInputControl, 1.0)     // Chat entry line automatically expands to fill the entire gap
+                .Add(fConnectButton, 0.0)    // Join button remains pinned on the far right
             .End();
+
 
 
 
@@ -824,12 +1088,6 @@ public:
         fLiberaSocket = nullptr;
         fOftcSocket = nullptr;
         fCurrentServerNode = nullptr;
-        
-        // Maybe use this in the future
-        // query the specific context server's nickname string
-		// BString localEcho;
-		// localEcho << "<" << contextServer->GetNick() << "> " << text << "\n";
-
         
         if (!cfg.servers.empty()) {
             fMyNick = cfg.servers[0].nick.c_str();
@@ -843,29 +1101,90 @@ public:
         // 7. Process Automatic Startup Connections instantly
         for (int32 i = 0; i < fChannelTree->CountItems(); i++) {
             ServerTreeItem* srvNode = dynamic_cast<ServerTreeItem*>(fChannelTree->ItemAt(i));
-            if (srvNode != nullptr && srvNode->IsAutoConnect()) {
-                ConnectToServer(srvNode);
+            if (srvNode != nullptr) {
+                bool triggerConnect = false;
+                size_t idx = srvNode->GetIndex();
+
+                // Check the configuration storage location based on the server node classification type
+                if (srvNode->IsCustom()) {
+                    if (idx < cfg.customServers.size()) {
+                        triggerConnect = cfg.customServers[idx].autoConnect;
+                    }
+                } else {
+                    if (idx < cfg.servers.size()) {
+                        triggerConnect = cfg.servers[idx].autoConnect;
+                    }
+                }
+
+                if (triggerConnect) {
+                    ConnectToServer(srvNode);
+                }
             }
         }              
-        
     }
+
 
 
 
     ~HIRCWindow() {
-        delete fLiberaSocket;
-        delete fOftcSocket;
+        // 1. Prepare the custom sign-off message payload
+        BString quitPayload;
+        quitPayload << "QUIT :" << cfg.quitMessage.c_str() << "\r\n";
+
+        std::vector<std::pair<thread_id, BSecureSocket*>> shutdownSnapshot;
         
-        // Loop and free our dynamic user list pointers from memory safely
+        Lock();
+        for (auto const& [serverNode, socketPtr] : fServerSockets) {
+            if (socketPtr != nullptr) {
+                socketPtr->Write(quitPayload.String(), quitPayload.Length());
+                thread_id tid = (fServerThreads.count(serverNode) > 0) ? fServerThreads[serverNode] : -1;
+                shutdownSnapshot.push_back({tid, socketPtr});
+            }
+        }
+        Unlock();
+
+        // Give the networking hardware a brief moment to flush the QUIT strings out
+        snooze(50000); // 50ms
+
+        // 2. Disconnect all sockets to tell the threads to drop out of their loops
+        for (auto const& [tid, socketPtr] : shutdownSnapshot) {
+            if (socketPtr != nullptr) {
+                socketPtr->Disconnect(); 
+            }
+        }
+
+        // Give the background worker threads a quick window to wake up and close on their own
+        snooze(50000); // 50ms
+
+        // 3. FORCE KILL STUBBORN THREADS: Completely breaks any deadlocks
+        for (auto const& [tid, socketPtr] : shutdownSnapshot) {
+            if (tid >= 0) {
+                // If the thread is still alive and didn't close gracefully, kill it instantly!
+                // This stops it from trapping wait_for_thread in a deadlock.
+                thread_info info;
+                if (get_thread_info(tid, &info) == B_OK) {
+                    kill_thread(tid); 
+                }
+            }
+        }
+
+        // 4. Clean up memory collections safely now that threads are guaranteed dead
         for (auto const& [key, listPtr] : fChannelUsers) {
             delete listPtr;
         }
+
+        // 5. Force the application process to instantly terminate and leave the Deskbar
+        be_app->PostMessage(B_QUIT_REQUESTED); 
     }
 
 
 
+
+
+
+
 private:
-	//@Menus
+    //@Menus
     // Change parameter to BListItem* so it can accept both servers and channels
     void ShowContextMenu(BPoint screenPoint, BListItem* item) {
         if (item == nullptr) return; // Safety check
@@ -890,8 +1209,15 @@ private:
         if (srvItem != nullptr) {
             BPopUpMenu* menu = new BPopUpMenu("ServerOptions", false, false);
             
-            uint32 commandMsg = (srvItem == fLiberaNode) ? MSG_CONNECT_LIBERA : MSG_CONNECT_OFTC;
-            menu->AddItem(new BMenuItem("Connect", new BMessage(commandMsg)));
+            // DYNAMIC CONNECTION ROUTING: Use hardcoded tokens for defaults, generic for custom
+            if (srvItem->IsCustom()) {
+                BMessage* connectMsg = new BMessage(MSG_CONNECT_CUSTOM_SERVER);
+                connectMsg->AddPointer("server_item", srvItem);
+                menu->AddItem(new BMenuItem("Connect", connectMsg));
+            } else {
+                uint32 commandMsg = (srvItem == fLiberaNode) ? MSG_CONNECT_LIBERA : MSG_CONNECT_OFTC;
+                menu->AddItem(new BMenuItem("Connect", new BMessage(commandMsg)));
+            }
             menu->AddSeparatorItem();
 
             // Toggle Auto-Connect Option
@@ -934,6 +1260,17 @@ private:
             menu->AddSeparatorItem();
             BMessage* aboutMsg = new BMessage(MSG_CONTEXT_ABOUT);
             menu->AddItem(new BMenuItem("About...", aboutMsg));
+
+            // DYNAMIC DELETION: Allow custom servers to be completely purged from JSON configs
+            if (srvItem->IsCustom()) {
+                menu->AddSeparatorItem();
+                BMessage* deleteMsg = new BMessage('dlcs'); // Define MSG_DELETE_CUSTOM_SERVER as 'dlcs'
+                deleteMsg->AddPointer("server_item", srvItem);
+                
+                BMenuItem* deleteItem = new BMenuItem("Delete Custom Server", deleteMsg);
+                // Give it a warning color state if supported, or leave plain
+                menu->AddItem(deleteItem);
+            }
             
             menu->SetTargetForItems(this);
             menu->Go(screenPoint, true, true, true);
@@ -947,39 +1284,46 @@ private:
 
 
     void ConnectToServer(ServerTreeItem* targetNode) {
-        if (targetNode == fLiberaNode) {
-            if (fLiberaThread >= 0) return; 
-            
-            // Build and insert the Server raw log node item instantly under Libera
-            BStringItem* serverLogItem = new BStringItem("[Server]");
-            fChannelTree->AddUnder(serverLogItem, fLiberaNode);
-            fChannelTree->Expand(fLiberaNode);
-            
-            // If nothing is selected yet, make this new server log view active
-            if (fActiveBufferItem == nullptr) fActiveBufferItem = serverLogItem;
+        if (targetNode == nullptr) return;
 
-            fTextBuffers[serverLogItem] << "Connecting to Libera Chat...\n";
-            fChatLog->SetText(fTextBuffers[serverLogItem].String());
+        // 1. Check if this specific server is already connecting/connected
+        if (fServerThreads.count(targetNode) > 0 && fServerThreads[targetNode] >= 0) {
+            return; 
+        }
+        
+        // 2. Build and insert the Server raw log node item instantly under the target node header
+        BStringItem* serverLogItem = new BStringItem("[Server]");
+        fChannelTree->AddUnder(serverLogItem, targetNode);
+        fChannelTree->Expand(targetNode);
+        
+        // If nothing is selected yet, make this new server log view active
+        if (fActiveBufferItem == nullptr) fActiveBufferItem = serverLogItem;
 
-            fLiberaThread = spawn_thread(NetworkLoop, "LiberaWorker", B_NORMAL_PRIORITY, targetNode);
-            if (fLiberaThread >= 0) resume_thread(fLiberaThread);
-        } else if (targetNode == fOftcNode) {
-            if (fOftcThread >= 0) return; 
+        // 3. Dynamically read the name from the item text for the log buffer echo
+        BString logMessage;
+        logMessage.SetToFormat("Connecting to %s...\n", targetNode->Text());
+        fTextBuffers[serverLogItem] << logMessage;
+        fChatLog->SetText(fTextBuffers[serverLogItem].String());
+
+        // 4. Generate a unique worker name thread label string dynamically
+        BString threadName;
+        threadName.SetToFormat("%sWorker", targetNode->Text());
+        // Clean out spaces from the string so thread creation stays tidy
+        threadName.ReplaceAll(" ", ""); 
+
+        // 5. Spawn the thread and associate it natively inside our index tracker map
+        thread_id newThread = spawn_thread(NetworkLoop, threadName.String(), B_NORMAL_PRIORITY, targetNode);
+        if (newThread >= 0) {
+            fServerThreads[targetNode] = newThread;
             
-            // Build and insert the Server raw log node item instantly under OFTC
-            BStringItem* serverLogItem = new BStringItem("[Server]");
-            fChannelTree->AddUnder(serverLogItem, fOftcNode);
-            fChannelTree->Expand(fOftcNode);
-            
-            if (fActiveBufferItem == nullptr) fActiveBufferItem = serverLogItem;
+            // Map legacy variables to prevent breakages elsewhere in app
+            if (targetNode == fLiberaNode) fLiberaThread = newThread;
+            if (targetNode == fOftcNode)   fOftcThread = newThread;
 
-            fTextBuffers[serverLogItem] << "Connecting to OFTC...\n";
-            fChatLog->SetText(fTextBuffers[serverLogItem].String());
-
-            fOftcThread = spawn_thread(NetworkLoop, "OFTCWorker", B_NORMAL_PRIORITY, targetNode);
-            if (fOftcThread >= 0) resume_thread(fOftcThread);
+            resume_thread(newThread);
         }
     }
+
 
 void LogToItemBuffer(BStringItem* itemNode, BString text) {
     if (itemNode == nullptr) return;
@@ -993,7 +1337,7 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
         int32 textLength = fChatLog->TextLength();
         fChatLog->Select(textLength, textLength);
         
-        // 2. Prepare our custom font variations based on your config size
+        // 2. Prepare our custom font variations based on config size
         BFont regularChatFont;
         fChatLog->GetFont(&regularChatFont);
         regularChatFont.SetSize(cfg.chatLogFontSize);
@@ -1122,8 +1466,7 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
     }
 
 
-    void ParseAndDisplayIRC(BString line) {   	    	
-    	
+void ParseAndDisplayIRC(BString line, ServerTreeItem* contextServer) {   	    	
         line.ReplaceAll("\r", "");
         line.ReplaceAll("\n", "");
 
@@ -1149,8 +1492,10 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             command = line;
         }
 
-        // Fallback safety check if pointer isn't initialized
-        if (fCurrentServerNode == nullptr) fCurrentServerNode = fLiberaNode;
+        // UPDATED: Use the passed context connection. Fallback to Libera only if null.
+        if (contextServer == nullptr) {
+            contextServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode : fLiberaNode;
+        }
 
         // Catch Successful Join actions (Handles Us AND Other Users)
         if (command == "JOIN") {
@@ -1161,13 +1506,16 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             int32 exclamIdx = userWhoJoined.FindFirst("!");
             if (exclamIdx != B_ERROR) userWhoJoined.Truncate(exclamIdx);
 
-            ChannelTreeItem* chanNode = FindChannelNode(fCurrentServerNode, channelJoined);
+            // UPDATED: Target the specific server connection context pointer explicitly
+            ChannelTreeItem* chanNode = FindChannelNode(contextServer, channelJoined);
             if (!chanNode) {
-                // If the channel node doesn't exist under this server yet, WE are the ones joining
-                ChannelTreeItem* newChanNode = new ChannelTreeItem(channelJoined.String(), fCurrentServerNode->GetIndex());
+                // FIXED: Pass contextServer's custom status flag down into the child channel item node
+                ChannelTreeItem* newChanNode = new ChannelTreeItem(channelJoined.String(), 
+                                                                   contextServer->GetIndex(), 
+                                                                   contextServer->IsCustom());
 
-                fChannelTree->AddUnder(newChanNode, fCurrentServerNode); 
-                fChannelTree->Expand(fCurrentServerNode);
+                fChannelTree->AddUnder(newChanNode, contextServer); 
+                fChannelTree->Expand(contextServer);
                 
                 LogToItemBuffer(newChanNode, BString("--- Joined channel ") << channelJoined << "\n");
                 fChannelUsers[newChanNode] = new BObjectList<BStringItem, true>(20);
@@ -1185,8 +1533,8 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                     if (!userExists) {
                         fChannelUsers[chanNode]->AddItem(new BStringItem(userWhoJoined.String()));
                         
-                        // Query active server node UI class wrapper instead of the global config
-                        bool hideStatusOnThisServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode->IsHideStatus() : false;
+                        // UPDATED: Read status visibility suppression from the explicitly scoped node
+                        bool hideStatusOnThisServer = contextServer->IsHideStatus();
                         
                         if (!hideStatusOnThisServer) {
                             LogToItemBuffer(chanNode, BString("--> ") << userWhoJoined << " has joined " << channelJoined << "\n");
@@ -1196,13 +1544,13 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                             RefreshUserListUI();
                         }
                     }
-
                 }
             }
             return;
         }
 
-        // NEW PROTOCOL INTERCEPTOR: Catch /LIST response lines from the network stream
+
+		// NEW PROTOCOL INTERCEPTOR: Catch /LIST response lines from the network stream
         if (command == "322") { 
             // Server data line structure: <YourNick> <#Channel> <UserCount> :[Topic Text]
             // We isolate the channel name and user count fields out of the space-delimited fields
@@ -1225,13 +1573,27 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             channelName.ReplaceAll(" ", "");
             userCount.ReplaceAll(" ", "");
 
-            // If a channel list window is open and listening, feed the item row package over securely
+            // Ensure we have a valid server context pointer passed to this engine block
+            if (contextServer == nullptr) {
+                contextServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode : fLiberaNode;
+            }
+
+            // UPDATED: Only feed the row item over if the active panel matches this specific network context stream
             if (fActiveListWindow != nullptr) {
-                BMessage* rowPackage = new BMessage(MSG_ADD_LIST_ROW);
-                rowPackage->AddString("channel", channelName.String());
-                rowPackage->AddString("users", userCount.String());
-                rowPackage->AddString("topic", trailing.String());
-                fActiveListWindow->PostMessage(rowPackage);
+                // Determine the socket the open window is listening to
+                BSecureSocket* windowTargetSocket = fActiveListWindow->GetTargetSocket(); 
+                BSecureSocket* activeNetworkSocket = fServerSockets[contextServer];
+
+                // Alternative: If window tracks the server pointer instead of raw sockets:
+                // if (fActiveListWindow->GetServerContext() == contextServer)
+
+                if (windowTargetSocket == activeNetworkSocket) {
+                    BMessage* rowPackage = new BMessage(MSG_ADD_LIST_ROW);
+                    rowPackage->AddString("channel", channelName.String());
+                    rowPackage->AddString("users", userCount.String());
+                    rowPackage->AddString("topic", trailing.String());
+                    fActiveListWindow->PostMessage(rowPackage);
+                }
             }
             return;
         }
@@ -1246,9 +1608,15 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             BString targetChannel = line;
             targetChannel.ReplaceAll(" ", "");
 
-            // Look through all rooms assigned to this active network to strip the leaving nick out
-            for (int32 c = 0; c < fChannelTree->CountItemsUnder(fCurrentServerNode, true); c++) {
-                ChannelTreeItem* chanNode = dynamic_cast<ChannelTreeItem*>(fChannelTree->ItemUnderAt(fCurrentServerNode, true, c));
+            // Ensure we have a valid server context pointer passed to this engine block
+            if (contextServer == nullptr) {
+                contextServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode : fLiberaNode;
+            }
+
+            // UPDATED: Look strictly through the channels assigned to the contextServer that received the data
+            int32 underCount = fChannelTree->CountItemsUnder(contextServer, true);
+            for (int32 c = 0; c < underCount; c++) {
+                ChannelTreeItem* chanNode = dynamic_cast<ChannelTreeItem*>(fChannelTree->ItemUnderAt(contextServer, true, c));
                 if (!chanNode) continue;
                 
                 // If it's a room-specific PART, skip loops on non-matching channel strings
@@ -1262,10 +1630,12 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                         if (itemTxt.StartsWith("@") || itemTxt.StartsWith("+")) itemTxt.Remove(0, 1);
                         
                         if (itemTxt == userWhoLeft) {
-                            fChannelUsers[chanNode]->RemoveItemAt(i);
+                            // FIXED: In Haiku, removing an item from a list doesn't delete it.
+                            // Pass the unlinked pointer to delete to completely free its heap memory!
+                            delete fChannelUsers[chanNode]->RemoveItemAt(i);
                             
-                            // Query your active server node class instead of the global configuration variable
-                            bool hideStatusOnThisServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode->IsHideStatus() : false;
+                            // UPDATED: Query the specific, thread-safe server context node for configuration properties
+                            bool hideStatusOnThisServer = contextServer->IsHideStatus();
                             
                             if (!hideStatusOnThisServer) {
                                 BString partNotice = (command == "PART") ? "has left" : "has quit";
@@ -1277,14 +1647,12 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                             }
                             break;
                         }
-
-
-
                     }
                 }
             }
             return;
         }
+
 
 
         // Catch Server Topic Event Numbers (332 = Topic Set, 331 = No Topic Set) or live /TOPIC updates
@@ -1301,7 +1669,13 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             }
             targetChannel.ReplaceAll(" ", "");
 
-            BStringItem* chanNode = FindChannelNode(fCurrentServerNode, targetChannel);
+            // Ensure we have a valid server context pointer passed to this engine block
+            if (contextServer == nullptr) {
+                contextServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode : fLiberaNode;
+            }
+
+            // UPDATED: Query the specific network context mapping explicitly
+            BStringItem* chanNode = FindChannelNode(contextServer, targetChannel);
             if (chanNode) {
                 BString dynamicTopic = (command == "331") ? "No topic set." : trailing;
                 
@@ -1325,6 +1699,7 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
 
 
 
+
         if (command == "353") { 
             int32 chIndex = line.FindLast("#");
             BString targetChannel = "";
@@ -1333,7 +1708,13 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                 targetChannel.ReplaceAll(" ", "");
             }
 
-            BStringItem* chanNode = FindChannelNode(fCurrentServerNode, targetChannel);
+            // Ensure we have a valid server context pointer passed to this engine block
+            if (contextServer == nullptr) {
+                contextServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode : fLiberaNode;
+            }
+
+            // UPDATED: Use contextServer directly to resolve multi-server namespace clashes safely
+            BStringItem* chanNode = FindChannelNode(contextServer, targetChannel);
             if (chanNode && fChannelUsers[chanNode] != nullptr) {
                 int32 spaceIdx;
                 while ((spaceIdx = trailing.FindFirst(" ")) != B_ERROR) {
@@ -1342,22 +1723,22 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                     trailing.Remove(0, spaceIdx + 1);
                     
                     if (singleUser.Length() > 0) {
-                        // FIX HERE: Use arrow operator (->) to insert items
                         fChannelUsers[chanNode]->AddItem(new BStringItem(singleUser.String()));
-                        if (fActiveBufferItem == chanNode) {
-                            fUserList->AddItem(new BStringItem(singleUser.String()));
-                        }
                     }
                 }
                 if (trailing.Length() > 0) {
                     fChannelUsers[chanNode]->AddItem(new BStringItem(trailing.String()));
-                    if (fActiveBufferItem == chanNode) {
-                        fUserList->AddItem(new BStringItem(trailing.String()));
-                    }
+                }
+
+                // Instead of manually duplicating raw pointers directly into fUserList,
+                // trigger pre-existing method to let it apply font scales and avoid memory leaks.
+                if (fActiveBufferItem == chanNode) {
+                    RefreshUserListUI();
                 }
             }
             return;
         }
+
 
 
         // Dynamic NICK Modification Handlers (Saves identity renames for Us and other network users)
@@ -1369,20 +1750,34 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             BString newNick = trailing.Length() > 0 ? trailing : line;
             newNick.ReplaceAll(" ", "");
 
-            // If the person changing nicks is US, update our local echo variable!
-            if (oldNick.ICompare(fMyNick) == 0) {
-                fMyNick = newNick;
+            // Ensure we have a valid server context pointer passed to this engine block
+            if (contextServer == nullptr) contextServer = fLiberaNode;
+
+            // Check nickname against the specific server's configuration
+            if (oldNick.ICompare(contextServer->GetNick()) == 0) {
+                // Update the configuration vector directly so GetNick() returns the new nickname
+                size_t serverIdx = contextServer->GetIndex();
+                if (contextServer->IsCustom() && serverIdx < cfg.customServers.size()) {
+                    cfg.customServers[serverIdx].nick = newNick.String();
+                } else if (!contextServer->IsCustom() && serverIdx < cfg.servers.size()) {
+                    cfg.servers[serverIdx].nick = newNick.String();
+                }
                 
-                // Print a clean message inside your active buffer letting you know it updated
                 BString itemNotice;
-                itemNotice << "--- Your nickname is now " << fMyNick << "\n";
+                itemNotice << "--- Your nickname on this server is now " << newNick << "\n";
                 LogToItemBuffer(fActiveBufferItem, itemNotice);
+                
+                // Keep fMyNick sync'd for backwards compatibility if needed elsewhere
+                fMyNick = newNick;
             }
 
-            // Sync user row indicators across all tracking pools under this server node
-            for (int32 c = 0; c < fChannelTree->CountItemsUnder(fCurrentServerNode, true); c++) {
-                ChannelTreeItem* chanNode = dynamic_cast<ChannelTreeItem*>(fChannelTree->ItemUnderAt(fCurrentServerNode, true, c));
+            // UPDATED: Loop through items strictly belonging to the contextServer that received the data
+            int32 underCount = fChannelTree->CountItemsUnder(contextServer, true);
+            for (int32 c = 0; c < underCount; c++) {
+                ChannelTreeItem* chanNode = dynamic_cast<ChannelTreeItem*>(fChannelTree->ItemUnderAt(contextServer, true, c));
                 if (chanNode && fChannelUsers[chanNode] != nullptr) {
+                    
+                    // We must delete the unlinked item manually in this loop to prevent memory leaks!
                     for (int32 i = 0; i < fChannelUsers[chanNode]->CountItems(); i++) {
                         BString currentEntry = fChannelUsers[chanNode]->ItemAt(i)->Text();
                         BString modePrefix = "";
@@ -1396,8 +1791,11 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                             BString updatedEntry;
                             updatedEntry << modePrefix << newNick;
                             
-                            fChannelUsers[chanNode]->RemoveItemAt(i);
+                            // FIXED: In Haiku, removing an item from a list doesn't delete it. 
+                            // Delete the old row item explicitly to prevent an ongoing memory leak!
+                            delete fChannelUsers[chanNode]->RemoveItemAt(i);
                             fChannelUsers[chanNode]->AddItem(new BStringItem(updatedEntry.String()), i);                            
+                            
                             BString nickNotice;
                             nickNotice << "--- " << oldNick << " is now known as " << newNick << "\n";
                             LogToItemBuffer(chanNode, nickNotice);
@@ -1416,6 +1814,7 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
 
 
 
+
         if (command == "PRIVMSG" || command == "NOTICE") {
             BString senderNick = prefix;
             int32 exclamIdx = senderNick.FindFirst("!");
@@ -1427,13 +1826,18 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             if (msgTargetSpace != B_ERROR) targetRoom.Truncate(msgTargetSpace);
             targetRoom.ReplaceAll(" ", "");
             
-            // 1. Establish the destination target node item reference
+            // Ensure we have a valid server context pointer passed to this engine block
+            if (contextServer == nullptr) {
+                contextServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode : fLiberaNode;
+            }
+
+            // 1. UPDATED: Establish the destination target node item reference using contextServer
             BStringItem* targetNode = nullptr;
             if (targetRoom.StartsWith("#")) {
-                targetNode = FindChannelNode(fCurrentServerNode, targetRoom);
+                targetNode = FindChannelNode(contextServer, targetRoom);
             }
             if (targetNode == nullptr) {
-                targetNode = FindServerLogNode(fCurrentServerNode);
+                targetNode = FindServerLogNode(contextServer);
             }
 
             // 2. TIMING CALCULATION ENGINE
@@ -1460,6 +1864,7 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                 }
             }
 
+
             // Assemble final message layout string
             BString formattedMsg;
             formattedMsg << timestampPrefix;
@@ -1483,10 +1888,17 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
 
             // AUTOMATION HOOK: Detect if NickServ is requesting authentication credentials
             if (senderNick.ICompare("NickServ") == 0 && trailing.IFindFirst("identify") != B_ERROR) {
-                BSecureSocket* activeSocket = (fCurrentServerNode == fOftcNode) ? fOftcSocket : fLiberaSocket;
                 
-                if (activeSocket != nullptr && fCurrentServerNode != nullptr) {
-                    BString savedPassword = fCurrentServerNode->GetPass();
+                // Pull the authentic communication pipe using lookup map safely
+                BSecureSocket* activeSocket = nullptr;
+                if (contextServer != nullptr && fServerSockets.count(contextServer) > 0) {
+                    activeSocket = fServerSockets[contextServer];
+                } else {
+                    activeSocket = (contextServer == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                }
+                
+                if (activeSocket != nullptr && contextServer != nullptr) {
+                    BString savedPassword = contextServer->GetPass();
                     
                     if (savedPassword.Length() > 0) {
                         BString autoIdentify;
@@ -1494,7 +1906,7 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                         activeSocket->Write(autoIdentify.String(), autoIdentify.Length());
                         
                         BString logNotice = "--- [Auto-Services] Identification credentials automatically sent to NickServ.\n";
-                        LogToItemBuffer(FindServerLogNode(fCurrentServerNode), logNotice);
+                        LogToItemBuffer(FindServerLogNode(contextServer), logNotice);
                     }
                 }
             }
@@ -1510,10 +1922,10 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
                     }
                     LogToItemBuffer(chanNode, formattedMsg);
                 } else {
-                    LogToItemBuffer(FindServerLogNode(fCurrentServerNode), formattedMsg);
+                    LogToItemBuffer(FindServerLogNode(contextServer), formattedMsg);
                 }
             } else {
-                LogToItemBuffer(FindServerLogNode(fCurrentServerNode), formattedMsg);
+                LogToItemBuffer(FindServerLogNode(contextServer), formattedMsg);
             }
         }
 
@@ -1521,19 +1933,28 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
         else if (trailing.Length() > 0) {
             // AUTOMATION HOOK FALLBACK: Intercept raw notices before registration fully establishes
             if (prefix.IFindFirst("NickServ") != B_ERROR && trailing.IFindFirst("identify") != B_ERROR) {
-                BSecureSocket* activeSocket = (fCurrentServerNode == fOftcNode) ? fOftcSocket : fLiberaSocket;
-                if (activeSocket != nullptr && fCurrentServerNode != nullptr && fCurrentServerNode->GetPass().Length() > 0) {
+                
+                // UPDATED: Dynamically fetch active socket mapping stream
+                BSecureSocket* activeSocket = nullptr;
+                if (contextServer != nullptr && fServerSockets.count(contextServer) > 0) {
+                    activeSocket = fServerSockets[contextServer];
+                } else {
+                    activeSocket = (contextServer == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                }
+
+                if (activeSocket != nullptr && contextServer != nullptr && contextServer->GetPass().Length() > 0) {
                     BString autoIdentify;
-                    autoIdentify << "PRIVMSG NickServ :IDENTIFY " << fCurrentServerNode->GetPass() << "\r\n";
+                    autoIdentify << "PRIVMSG NickServ :IDENTIFY " << contextServer->GetPass() << "\r\n";
                     activeSocket->Write(autoIdentify.String(), autoIdentify.Length());
                     
                     BString logNotice = "--- [Auto-Services] Pre-registration identification sent to NickServ.\n";
-                    LogToItemBuffer(FindServerLogNode(fCurrentServerNode), logNotice);
+                    LogToItemBuffer(FindServerLogNode(contextServer), logNotice);
                 }
             }
 
             // General Server Protocol output (MOTD, Notices, Connection headers) -> routes to "[Server]" tree node
-            BStringItem* svrLogNode = FindServerLogNode(fCurrentServerNode);
+            // UPDATED: Route using explicit context pointer safely
+            BStringItem* svrLogNode = FindServerLogNode(contextServer);
             if (svrLogNode) {
                 BString rawLog;
                 rawLog << trailing << "\n";
@@ -1541,6 +1962,7 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             }
         }
     }
+
 
     static status_t NetworkLoop(void* data) {
         ServerTreeItem* targetNode = static_cast<ServerTreeItem*>(data);
@@ -1561,11 +1983,14 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             return B_ERROR;
         }
 
-        if (targetNode == window->fLiberaNode) {
-            window->fLiberaSocket = localSocket;
-        } else {
-            window->fOftcSocket = localSocket;
-        }
+        // UPDATED: Dynamically track socket connection instances using our tracker map
+        window->Lock(); // Ensure thread-safe map insertion
+        window->fServerSockets[targetNode] = localSocket;
+        
+        // Map legacy pointers to prevent breakages elsewhere 
+        if (targetNode == window->fLiberaNode) window->fLiberaSocket = localSocket;
+        if (targetNode == window->fOftcNode)   window->fOftcSocket = localSocket;
+        window->Unlock();
 
         // 1. Dynamic Nickname Handshake Configuration
         BString nickHandshake;
@@ -1619,27 +2044,38 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
             }
         }
 
-        // 4. Thread and Socket Cleanup State Reset
+        // 5. Thread and Socket Cleanup State Reset
         bool triggerReconnect = targetNode->IsAutoReconnect();
         
-        if (targetNode == window->fLiberaNode) {
-            window->fLiberaThread = -1;
-            window->fLiberaSocket = nullptr;
-        } else {
-            window->fOftcThread = -1;
-            window->fOftcSocket = nullptr;
-        }
-        
-       // Send a post message to the window to execute a safe thread-safe reconnection loop pass
-        if (triggerReconnect) {
-            BMessage* reconnectMessage = new BMessage(MSG_RECONNECT_SERVER);
-            reconnectMessage->AddPointer("server_item", targetNode);
-            window->PostMessage(reconnectMessage);
+        // Before accessing the window maps, ensure the window is still fully valid and active
+        if (be_app->CountWindows() > 0 && be_app->WindowAt(0) == window) {
+            if (window->Lock()) { // Double check thread safety lock boundaries
+                window->fServerSockets.erase(targetNode);
+                window->fServerThreads.erase(targetNode);
+                
+                if (targetNode == window->fLiberaNode) {
+                    window->fLiberaThread = -1;
+                    window->fLiberaSocket = nullptr;
+                } else if (targetNode == window->fOftcNode) {
+                    window->fOftcThread = -1;
+                    window->fOftcSocket = nullptr;
+                }
+                window->Unlock();
+                
+                // Only post a reconnection message if the parent workspace isn't shutting down
+                if (triggerReconnect) {
+                    BMessage* reconnectMessage = new BMessage(MSG_RECONNECT_SERVER);
+                    reconnectMessage->AddPointer("server_item", targetNode);
+                    window->PostMessage(reconnectMessage);
+                }
+            }
         }
 
         delete localSocket;
         return B_OK;
     }
+
+
 
 public:
     void DispatchMessage(BMessage* message, BHandler* handler) override {
@@ -1668,13 +2104,13 @@ public:
                         if (chanItem != nullptr) {
                             BPopUpMenu* menu = new BPopUpMenu("ChannelOptions", false, false);
                             
-                            // 1. Keep your existing Auto-Join toggle option
+                            // 1. Auto-Join toggle option
                             BString label = chanItem->IsAutoJoin() ? "Disable Auto-Join" : "Enable Auto-Join";
                             BMessage* toggleMsg = new BMessage(MSG_TOGGLE_AUTOJOIN);
                             toggleMsg->AddPointer("chan_item", chanItem); 
                             menu->AddItem(new BMenuItem(label.String(), toggleMsg));
                             
-                            // 2. FIXED: Append a separator and your new Remove Channel item
+                            // 2. Append a separator and new Remove Channel item
                             menu->AddSeparatorItem();
                             
                             BMessage* removeMsg = new BMessage('rmch'); // Remove Channel token
@@ -1696,6 +2132,88 @@ public:
 	//@messagereceived
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
+
+        case 'dlcs': { // Delete Custom Server Message
+            ServerTreeItem* srvItem;
+            if (message->FindPointer("server_item", (void**)&srvItem) == B_OK && srvItem != nullptr) {
+                size_t targetIndex = srvItem->GetIndex();
+                
+                if (srvItem->IsCustom() && targetIndex < cfg.customServers.size()) {
+                    // 1. Erase item block directly out of global structural configurations vector array
+                    cfg.customServers.erase(cfg.customServers.begin() + targetIndex);
+                    
+                    // 2. Remove the matching object memory block container node directly out of the visual sidebar tree
+                    fChannelTree->RemoveItem(srvItem);
+                    delete srvItem;
+
+                    // 3. IMPORTANT: Update the internal indexes of remaining Custom Server items in the list tree
+                    for (int32 i = 0; i < fChannelTree->CountItems(); i++) {
+                        ServerTreeItem* current = dynamic_cast<ServerTreeItem*>(fChannelTree->ItemAt(i));
+                        if (current != nullptr && current->IsCustom()) {
+                            // If it sat further down the list past the item we deleted, step its internal index back by 1
+                            size_t curIdx = current->GetIndex();
+                            if (curIdx > targetIndex) {
+                                // Re-instantiate or mutate item's internal property. 
+                                // Since fields are private, if you don't have a SetIndex helper, you can do:
+                                // current->fConfigIndex--; (if HIRCWindow is a friend class)
+                                // Better: add void SetIndex(size_t idx) { fConfigIndex = idx; } to ServerTreeItem
+                                current->SetIndex(curIdx - 1); 
+                            }
+                        }
+                    }
+
+                    // 4. Update config text file immediately
+                    save_config();
+                    fChannelTree->Invalidate();
+                }
+            }
+            break;
+        }
+
+        case 'adcs': {            
+            AddServerWindow* dlg = new AddServerWindow(this);
+            dlg->Show(); 
+            break;
+        }
+
+        case MSG_ADD_CUSTOM_SERVER_SUBMIT: {
+            BString name, host, nick, pass;
+            int32 port;
+
+            if (message->FindString("name", &name) == B_OK &&
+                message->FindString("host", &host) == B_OK &&
+                message->FindInt32("port", &port) == B_OK &&
+                message->FindString("nick", &nick) == B_OK) {
+                
+                message->FindString("pass", &pass); // Can remain blank safely
+
+                // 1. Build the data structure block matching settings scheme
+                ServerConfig customSrv;
+                customSrv.name = name.String();
+                customSrv.host = host.String();
+                customSrv.port = static_cast<uint16>(port);
+                customSrv.nick = nick.String();
+                customSrv.pass = pass.String();
+                customSrv.autoConnect = false;
+                customSrv.autoReconnect = false;
+                customSrv.hideStatusMessages = false;
+
+                // 2. Append directly to the config struct vector array and save file changes
+                cfg.customServers.push_back(customSrv);
+                save_config();
+
+                // 3. Update the UI tree instantly on screen without restarting!
+                size_t newIndex = cfg.customServers.size() - 1;
+                ServerTreeItem* customNode = new ServerTreeItem(customSrv.name.c_str(), newIndex, false, true);
+                
+                fChannelTree->AddItem(customNode);
+                fChannelTree->Invalidate(); // Force Haiku redraw interface block
+            }
+            break;
+        }
+
+
+
         	
     case 'rmch': { // Remove Channel action handler
         ChannelTreeItem* chanItem = nullptr;
@@ -1705,27 +2223,50 @@ public:
             // 1. Send network message to leave communication space gracefully if socket exists
             ServerTreeItem* parentServer = static_cast<ServerTreeItem*>(fChannelTree->Superitem(chanItem));
             if (parentServer != nullptr) {
-                BSecureSocket* activeSocket = (parentServer == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                
+                // UPDATED: Dynamically pull the correct network connection out of our lookup map
+                BSecureSocket* activeSocket = nullptr;
+                if (fServerSockets.count(parentServer) > 0) {
+                    activeSocket = fServerSockets[parentServer];
+                } else {
+                    activeSocket = (parentServer == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                }
+
                 if (activeSocket != nullptr) {
                     BString partCmd;
                     partCmd << "PART " << chanItem->Text() << " :Channel removed by user\r\n";
                     activeSocket->Write(partCmd.String(), partCmd.Length());
                 }
                 
-                // 2. Remove the channel name from the configuration's autojoin vector array
+                // 2. Remove the channel name from the correct configuration's autojoin vector array
                 size_t serverIdx = parentServer->GetIndex();
-                if (serverIdx < cfg.servers.size()) {
-                    BString targetChanName(chanItem->Text());
-                    // Remove dynamic tracking suffix text tags if present (like " [A]") before matching
-                    int32 tagPos = targetChanName.FindFirst(" [");
-                    if (tagPos != B_ERROR) targetChanName.Truncate(tagPos);
-                    
-                    auto& autojoinVec = cfg.servers[serverIdx].autojoin;
-                    for (auto it = autojoinVec.begin(); it != autojoinVec.end(); ) {
-                        if (targetChanName.ICompare(it->c_str()) == 0) {
-                            it = autojoinVec.erase(it);
-                        } else {
-                            ++it;
+                BString targetChanName(chanItem->Text());
+                
+                // Remove dynamic tracking suffix text tags if present (like " [A]") before matching
+                int32 tagPos = targetChanName.FindFirst(" [");
+                if (tagPos != B_ERROR) targetChanName.Truncate(tagPos);
+
+                // UPDATED: Point to either customServers or standard servers vector securely using the item flag
+                if (parentServer->IsCustom()) {
+                    if (serverIdx < cfg.customServers.size()) {
+                        auto& autojoinVec = cfg.customServers[serverIdx].autojoin;
+                        for (auto it = autojoinVec.begin(); it != autojoinVec.end(); ) {
+                            if (targetChanName.ICompare(it->c_str()) == 0) {
+                                it = autojoinVec.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
+                    }
+                } else {
+                    if (serverIdx < cfg.servers.size()) {
+                        auto& autojoinVec = cfg.servers[serverIdx].autojoin;
+                        for (auto it = autojoinVec.begin(); it != autojoinVec.end(); ) {
+                            if (targetChanName.ICompare(it->c_str()) == 0) {
+                                it = autojoinVec.erase(it);
+                            } else {
+                                ++it;
+                            }
                         }
                     }
                 }
@@ -1735,7 +2276,12 @@ public:
             if (fActiveBufferItem == chanItem) {
                 fActiveBufferItem = nullptr;
                 fChatLog->SetText("");
-                fUserList->MakeEmpty();
+                
+                // FIXED: Manually wipe and completely delete layout rows to prevent memory leaks
+                while (fUserList->CountItems() > 0) {
+                    delete fUserList->RemoveItem((int32)0);
+                }
+                
                 fTopicView->SetText("No active channel buffer targeted.");
             }
             
@@ -1756,6 +2302,7 @@ public:
         }
         break;
     }
+
 
         	
     case 'mscf': {
@@ -1780,7 +2327,7 @@ public:
         // 2. FIXED: Update Topic View Bar Font Size
         BFont topicFont;
         fTopicView->GetFont(&topicFont);
-        topicFont.SetSize(cfg.chatLogFontSize); // Make it match your chat log text size
+        topicFont.SetSize(cfg.chatLogFontSize); // Make chat log text size
         fTopicView->SetFont(&topicFont);
         fTopicView->TextView()->SetFontAndColor(&topicFont, B_FONT_SIZE); // Updates the editable region
         fTopicView->InvalidateLayout();
@@ -1791,6 +2338,11 @@ public:
         fChatLog->GetFont(&chatFont);
         chatFont.SetSize(cfg.chatLogFontSize);
         fChatLog->SetFont(&chatFont);
+
+        // Tell the text view to smoothly scale all characters to the new size
+        fChatLog->SetFontAndColor(&chatFont, B_FONT_SIZE); 
+        fChatLog->Invalidate();
+
 
         BString temporaryTextBuffer(fChatLog->Text());
         text_run_array* runArray = (text_run_array*)malloc(sizeof(text_run_array));
@@ -1831,46 +2383,15 @@ public:
         ServerTreeItem* item = nullptr;
         if (message->FindPointer("server_item", (void**)&item) == B_OK && item != nullptr) {
             
-            // Loop through your configuration vectors to map the correct active vector index block
-            size_t matchingIndex = 0;
-            bool found = false;
-            for (size_t i = 0; i < cfg.servers.size(); i++) {
-                // Check matching pointer trackers or structural node names
-                if ((item == fLiberaNode && i == 0) || (item == fOftcNode && i == 1)) {
-                    matchingIndex = i;
-                    found = true;
-                    break;
-                }
-            }
+            size_t matchingIndex = item->GetIndex(); // Extract the true index directly from the item!
+            bool isCustom = item->IsCustom();        // Extract whether it is custom or default
             
-            // Fallback match check by string text comparison if custom server added
-            if(!found) {
-                for (size_t i = 0; i < cfg.servers.size(); i++) {
-                    if (cfg.servers[i].name == item->Text()) {
-                        matchingIndex = i;
-                        found = true;
-                        break;
-                    }
-                }
-            }
-
-            // Spawn the custom configuration layout panel cleanly
-            ServerConfigWindow* configWin = new ServerConfigWindow(this, item, matchingIndex);
+            // Pass the custom flag as a new 4th argument to the dialog window constructor
+            ServerConfigWindow* configWin = new ServerConfigWindow(this, item, matchingIndex, isCustom);
             configWin->Show();
         }
         break;
     }
-
-/*
-    case MSG_SAVE_CONFIG_FILE: {
-        // Trigger your configuration save code to push updates straight to hard disk
-        save_config();
-        
-        // Push safe feedback notification directly into the active viewport
-        LogToItemBuffer(fActiveBufferItem, "System: Configuration updates successfully written to disk.\n");
-        break;
-    }
-*/
 
 
             case MSG_RECONNECT_SERVER: {
@@ -1935,23 +2456,24 @@ public:
 		    case MSG_TOGGLE_HIDE_STATUS: {
         		ServerTreeItem* item = nullptr;
         		if (message->FindPointer("server_item", (void**)&item) == B_OK && item != nullptr) {
-            		// Flip the state inside the UI element
+            		// 1. Flip the state inside the visible UI tree item element
             		bool newStatus = !item->IsHideStatus();
             		item->SetHideStatus(newStatus);
             
-            		BString itemText(item->Text());
+            		size_t targetIndex = item->GetIndex();
 
-            		// Map the item to our active config vector slot
-            		for (size_t i = 0; i < cfg.servers.size(); i++) {
-               			// Use StartsWith to completely ignore any dynamic trailing tags like [AC] or [AR]
-                		if ((item == fLiberaNode && i == 0) || 
-                    		(item == fOftcNode && i == 1) || 
-                    		(itemText.StartsWith(cfg.servers[i].name.c_str()))) {
-                    
-                    		cfg.servers[i].hideStatusMessages = newStatus;
-                    		break;
-                		}
+            		// 2. UPDATED: Directly target the correct array vector index using properties
+            		if (item->IsCustom()) {
+                        if (targetIndex < cfg.customServers.size()) {
+                            cfg.customServers[targetIndex].hideStatusMessages = newStatus;
+                        }
+            		} else {
+                        if (targetIndex < cfg.servers.size()) {
+                            cfg.servers[targetIndex].hideStatusMessages = newStatus;
+                        }
             		}
+            		
+            		// 3. Commit changes to hircConfig.txt JSON file instantly
             		save_config(); 
         		}
         		break;
@@ -1962,11 +2484,19 @@ public:
         	
             case MSG_CONTEXT_CHAN_LIST: {
                 void* ptr;
-                if (message->FindPointer("server_item", &ptr) == B_OK) {
+                // FIXED: FindPointer requires a pointer-to-a-pointer (void**)&ptr cast to work correctly
+                if (message->FindPointer("server_item", (void**)&ptr) == B_OK) {
                     ServerTreeItem* serverItem = static_cast<ServerTreeItem*>(ptr);
                     if (serverItem != nullptr) {
-                        // Pick the active network socket matching the right-clicked server node
-                        BSecureSocket* activeSocket = (serverItem == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                        
+                        // UPDATED: Dynamically fetch the accurate active network connection from our lookup map
+                        BSecureSocket* activeSocket = nullptr;
+                        if (fServerSockets.count(serverItem) > 0) {
+                            activeSocket = fServerSockets[serverItem];
+                        } else {
+                            // Backwards-compatibility fallback for default servers on startup
+                            activeSocket = (serverItem == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                        }
                         
                         if (activeSocket != nullptr) {
                             // Launch or activate the float list view pop-up window
@@ -1978,7 +2508,8 @@ public:
                             }
                         } else {
                             // Fallback warning if the user attempts to view channels while completely offline
-                            BString warning = "System Error: You must connect to this server first before requesting a channel list.\n";
+                            BString warning;
+                            warning.SetToFormat("System Error: You must connect to '%s' first before requesting a channel list.\n", serverItem->Text());
                             LogToItemBuffer(fActiveBufferItem, warning);
                         }
                     }
@@ -1994,7 +2525,8 @@ public:
         	
             case MSG_TOGGLE_AUTOCONNECT: {
                 void* ptr;
-                if (message->FindPointer("server_item", &ptr) == B_OK) {
+                // FIXED: Cast to (void**)&ptr to comply with the Haiku FindPointer API signature
+                if (message->FindPointer("server_item", (void**)&ptr) == B_OK) {
                     ServerTreeItem* serverItem = static_cast<ServerTreeItem*>(ptr);
                     if (serverItem != nullptr) {
                         size_t idx = serverItem->GetIndex();
@@ -2002,14 +2534,26 @@ public:
                         // Invert state value
                         bool newState = !serverItem->IsAutoConnect();
                         serverItem->SetAutoConnect(newState);
-                        cfg.servers[idx].autoConnect = newState;
                         
+                        // UPDATED: Route the configuration assignment to the correct target profile vector
+                        if (serverItem->IsCustom()) {
+                            if (idx < cfg.customServers.size()) {
+                                cfg.customServers[idx].autoConnect = newState;
+                            }
+                        } else {
+                            if (idx < cfg.servers.size()) {
+                                cfg.servers[idx].autoConnect = newState;
+                            }
+                        }
+                        
+                        // Flush to settings file and force immediate sidebar graphic redraw loop pass
                         save_config();
                         fChannelTree->InvalidateItem(fChannelTree->IndexOf(serverItem));
                     }
                 }
                 break;
             }
+
             
             case B_COLORS_UPDATED: {
                 // 1. Grab the fresh system palette colors that were just chosen
@@ -2040,21 +2584,40 @@ public:
         	
             case MSG_TOGGLE_AUTOJOIN: {
                 void* ptr;
-                if (message->FindPointer("chan_item", &ptr) == B_OK) {
+                // FIXED: Cast to (void**)&ptr to comply with the Haiku FindPointer API signature
+                if (message->FindPointer("chan_item", (void**)&ptr) == B_OK) {
                     ChannelTreeItem* chanItem = static_cast<ChannelTreeItem*>(ptr);
                     if (chanItem != nullptr) {
                         size_t srvIdx = chanItem->GetServerIndex();
                         std::string targetChan = chanItem->Text();
                         
-                        if (chanItem->IsAutoJoin()) {
-                            // Deactivate: Remove the string leaf value from our configuration vector maps array data
-                            auto& vec = cfg.servers[srvIdx].autojoin;
-                            vec.erase(std::remove(vec.begin(), vec.end(), targetChan), vec.end());
-                            chanItem->SetAutoJoin(false);
+                        // UPDATED: Route data manipulation to customServers or servers using the item flag
+                        if (chanItem->IsCustom()) {
+                            if (srvIdx < cfg.customServers.size()) {
+                                auto& vec = cfg.customServers[srvIdx].autojoin;
+                                if (chanItem->IsAutoJoin()) {
+                                    // Deactivate: Remove the string leaf value from our configuration vector
+                                    vec.erase(std::remove(vec.begin(), vec.end(), targetChan), vec.end());
+                                    chanItem->SetAutoJoin(false);
+                                } else {
+                                    // Activate: Append string into configuration profile
+                                    vec.push_back(targetChan);
+                                    chanItem->SetAutoJoin(true);
+                                }
+                            }
                         } else {
-                            // Activate: Append string into configuration profile
-                            cfg.servers[srvIdx].autojoin.push_back(targetChan);
-                            chanItem->SetAutoJoin(true);
+                            if (srvIdx < cfg.servers.size()) {
+                                auto& vec = cfg.servers[srvIdx].autojoin;
+                                if (chanItem->IsAutoJoin()) {
+                                    // Deactivate: Remove the string leaf value from our configuration vector
+                                    vec.erase(std::remove(vec.begin(), vec.end(), targetChan), vec.end());
+                                    chanItem->SetAutoJoin(false);
+                                } else {
+                                    // Activate: Append string into configuration profile
+                                    vec.push_back(targetChan);
+                                    chanItem->SetAutoJoin(true);
+                                }
+                            }
                         }
                         
                         // Flush the changes instantly onto the hard disk and force row graphics updates
@@ -2064,6 +2627,7 @@ public:
                 }
                 break;
             }
+
 
         	
             case 'slch': {
@@ -2088,8 +2652,11 @@ public:
                         
                         // 2. Clear visual modules
                         fChatLog->SetText("");
-                        fUserList->MakeEmpty();
-                        fTopicView->SetText("No topic set.");
+                         	while (fUserList->CountItems() > 0) {
+    						delete fUserList->RemoveItem((int32)0);
+							}
+
+							fTopicView->SetText("No topic set.");
 
                         BString itemText(selectedItem->Text());
                         if (itemText == "[Server]") {
@@ -2115,7 +2682,7 @@ public:
                                             BStringItem* newUserItem = new BStringItem(users->ItemAt(i)->Text());
                                             fUserList->AddItem(newUserItem);
                                             
-                                            // FIXED: Force individual user rows to calculate heights at your custom scale
+                                            // Force individual user rows to calculate heights at custom scale
                                             newUserItem->Update(fUserList, &userListFont);
                                         }
                                     }
@@ -2125,36 +2692,22 @@ public:
                             }
                         }
 
-                        // 3. FIXED: Re-populate visible chat log panel using your configuration dimensions
-                        if (fTextBuffers.find(fActiveBufferItem) != fTextBuffers.end()) {
-                            
-                            // Grab current container font parameters and force your layout configuration sizing
-                            BFont customChatFont;
-                            fChatLog->GetFont(&customChatFont);
-                            customChatFont.SetSize(cfg.chatLogFontSize);
-                            
-                            rgb_color currentThemeTextColor = ui_color(B_DOCUMENT_TEXT_COLOR);
-                            
-                            // DO NOT use be_plain_font here; pass your explicitly sized customChatFont
-                            fChatLog->SetFontAndColor(&customChatFont, B_FONT_ALL, &currentThemeTextColor);
-                            
-                            // Construct a heap-allocated run array map to uniformly enforce the size across history data
-                            text_run_array* historyRuns = (text_run_array*)malloc(sizeof(text_run_array));
-                            if (historyRuns != nullptr) {
-                                historyRuns->count = 1;
-                                historyRuns->runs[0].offset = 0;
-                                historyRuns->runs[0].font = customChatFont;
-                                historyRuns->runs[0].color = currentThemeTextColor;
+						// 3. Re-populate visible chat log panel cleanly using configuration dimensions
+							if (fTextBuffers.find(fActiveBufferItem) != fTextBuffers.end()) {
+    
+    							BFont customChatFont;
+    							fChatLog->GetFont(&customChatFont);
+    							customChatFont.SetSize(cfg.chatLogFontSize);
+    							rgb_color currentThemeTextColor = ui_color(B_DOCUMENT_TEXT_COLOR);
+    
+    							fChatLog->SetText("");
+    							fChatLog->SetFontAndColor(&customChatFont, B_FONT_ALL, &currentThemeTextColor);
+    
+    							// Populating raw text directly into the view avoids formatting glitch complexities
+    							fChatLog->Insert(fTextBuffers[fActiveBufferItem].String());
+							} else {
+    							fChatLog->SetText("");							}
 
-                                fChatLog->SetText("");
-                                fChatLog->Insert(fTextBuffers[fActiveBufferItem].String(), historyRuns);
-                                free(historyRuns);
-                            } else {
-                                fChatLog->SetText(fTextBuffers[fActiveBufferItem].String());
-                            }
-                        } else {
-                            fChatLog->SetText("");
-                        }
                         
                         // Force the scrollbar viewport directly back down to the bottom
                         int32 newLength = fChatLog->TextLength();
@@ -2167,7 +2720,13 @@ public:
             }
 
 
-
+            case MSG_CONNECT_CUSTOM_SERVER: { 
+                ServerTreeItem* customNode = nullptr;
+                if (message->FindPointer("server_item", (void**)&customNode) == B_OK && customNode != nullptr) {
+                    ConnectToServer(customNode);
+                }
+                break;
+            }
         	
         	
             case MSG_CONNECT_LIBERA:
@@ -2204,8 +2763,20 @@ public:
                         }
                     }
 
-                    if (contextServer == nullptr) contextServer = fLiberaNode;
-                    BSecureSocket* activeSocket = (contextServer == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                    // 1. Fallback safety constraint mapping
+                    if (contextServer == nullptr) {
+                        contextServer = fLiberaNode;
+                    }
+
+                    // 2. UPDATED: Dynamic lookup matching from our new socket array map
+                    BSecureSocket* activeSocket = nullptr;
+                    if (fServerSockets.count(contextServer) > 0) {
+                        activeSocket = fServerSockets[contextServer];
+                    } else {
+                        // Backwards-compatibility fallback if thread map mapping hasn't filled yet
+                        activeSocket = (contextServer == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                    }
+
 
                     if (activeSocket != nullptr) {
                         BString rawPayload;
@@ -2241,7 +2812,7 @@ public:
                                         timestampPrefix = timeBuffer;
                                     }
 
-                                    // 3. Render your action locally
+                                    // 3. Render action locally
                                     BString echoStr;
                                     echoStr << timestampPrefix << "* " << fMyNick << " " << commandLine << "\n";
                                     LogToItemBuffer(fActiveBufferItem, echoStr);
@@ -2263,7 +2834,7 @@ public:
                                     // Translate into official IRC protocol syntax
                                     rawPayload << "PRIVMSG " << dmTarget << " :" << msgBody << "\r\n";
                                     
-                                    // Echo the outgoing whisper locally into your active window
+                                    // Echo the outgoing whisper locally into active window
                                     BString echoStr;
                                     echoStr << "-> To " << dmTarget << ": " << msgBody << "\n";
                                     LogToItemBuffer(fActiveBufferItem, echoStr);
@@ -2310,12 +2881,14 @@ public:
 
             case MSG_IRC_RECEIVED: {
                 BString rawLine;
-                void* nodePtr;
+                void* nodePtr = nullptr;
                 if (message->FindString("text", &rawLine) == B_OK) {
-                    if (message->FindPointer("server_node", &nodePtr) == B_OK) {
+                    if (message->FindPointer("server_node", (void**)&nodePtr) == B_OK && nodePtr != nullptr) {
                         fCurrentServerNode = static_cast<ServerTreeItem*>(nodePtr);
                     }
-                    ParseAndDisplayIRC(rawLine);
+                    
+                    // FIXED: Forward the true context pointer explicitly down to the processing logic
+                    ParseAndDisplayIRC(rawLine, fCurrentServerNode);
                 }
                 break;
             }
@@ -2340,7 +2913,9 @@ private:
     std::map<BStringItem*, BString> fChannelTopics;
     std::map<BStringItem*, BObjectList<BStringItem, true>*> fChannelUsers;
     std::map<BStringItem*, bigtime_t> fLastTimestampTime;
-      
+    std::map<ServerTreeItem*, thread_id> fServerThreads;
+    std::map<ServerTreeItem*, BSecureSocket*> fServerSockets;
+
 	BTextControl*     fTopicView;
     BTextView*        fChatLog;
     BListView*        fUserList;
