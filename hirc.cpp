@@ -34,6 +34,8 @@
 #include <LayoutBuilder.h>
 #include <SplitView.h>
 #include <Alert.h>
+#include <CheckBox.h>
+#include <MenuField.h>
 
 // Data Types, Sockets & Networking Kit Headers
 #include <String.h>
@@ -61,12 +63,19 @@ struct ServerConfig {
     bool autoConnect; 
     bool hideStatusMessages = false; 
     bool autoReconnect; 
+    int32 serverListFontSize = 12;
+    int32 chatLogFontSize = 12;
+    int32 userListFontSize = 12;    
+ 
 };
 
 struct Config {
     bool debugEnable = false;
     bool hideStatusMessages = false; 
     std::vector<ServerConfig> servers;
+    int32 serverListFontSize = 12;
+    int32 chatLogFontSize = 12;
+    int32 userListFontSize = 12;
 } cfg;
 
 int selectedConfig = 0;
@@ -83,7 +92,12 @@ void save_config() {
     ensure_config_dir();
     json j;
     j["debugEnable"] = cfg.debugEnable;
-    j["hideStatusMessages"] = cfg.hideStatusMessages; 
+
+    
+    
+    j["serverListFontSize"] = cfg.serverListFontSize;
+    j["chatLogFontSize"] = cfg.chatLogFontSize;
+    j["userListFontSize"] = cfg.userListFontSize;
     
     json serverArray = json::array();
     for (const auto& srv : cfg.servers) {
@@ -94,7 +108,8 @@ void save_config() {
         s["nick"] = srv.nick;
         s["pass"] = srv.pass;
         s["autoConnect"] = srv.autoConnect; 
-        s["autoReconnect"] = srv.autoReconnect; 
+        s["autoReconnect"] = srv.autoReconnect;
+        s["hideStatusMessages"] = srv.hideStatusMessages; 
         json ajArray = json::array();
         for (const auto& chan : srv.autojoin) {
             ajArray.push_back(chan);
@@ -118,7 +133,8 @@ void save_config() {
 void load_config() {
     ensure_config_dir();
     cfg.debugEnable = false;
-    cfg.hideStatusMessages = false; 
+    cfg.hideStatusMessages = false;     
+ 
     // Empty the global array vector
     cfg.servers.clear(); 
 
@@ -131,8 +147,12 @@ void load_config() {
         if (infile.is_open()) {
             try {
                 json j = json::parse(infile);
-                cfg.debugEnable = j.value("debugEnable", false);             
                 
+                cfg.debugEnable = j.value("debugEnable", false);             
+                cfg.serverListFontSize = j.value("serverListFontSize", (int32)12);
+    			cfg.chatLogFontSize    = j.value("chatLogFontSize", (int32)12);
+    			
+    			cfg.userListFontSize   = j.value("userListFontSize", (int32)12);  
                 if (j.contains("servers") && j["servers"].is_array()) {
                     for (const auto& s : j["servers"]) {
                         ServerConfig srv;
@@ -143,6 +163,7 @@ void load_config() {
                         srv.pass = s.value("pass", "");
                         srv.autoReconnect = s.value("autoReconnect", false); 
                         srv.autoConnect = s.value("autoConnect", false); 
+                        srv.hideStatusMessages = s.value("hideStatusMessages", false);
                         if (s.contains("autojoin") && s["autojoin"].is_array()) {
                             for (const auto& chan : s["autojoin"]) {
                                 srv.autojoin.push_back(chan.get<std::string>());
@@ -216,7 +237,16 @@ enum {
     MSG_CONTEXT_ABOUT      = 'cxab',
     MSG_TOGGLE_AUTORECONNECT = 'tgar',
     MSG_RECONNECT_SERVER = 'rcsv',
+    MSG_CONFIG_SAVE = 'cfsv',
+    MSG_CONFIG_CANCEL = 'cfcn',
+	MSG_CONTEXT_CONFIGURE_SERVER = 'mccs',
+	MSG_SAVE_CONFIG_FILE = 'mscf',
 };
+
+
+
+
+
 
 
 
@@ -281,7 +311,7 @@ private:
     BString fTopic;
 };
 
-// 2. NOW DECLARE THE WINDOW: Now it completely understands what a ChannelRowItem is!
+// 2. DECLARE THE WINDOW
 class IRCChannelListWindow : public BWindow {
 public:
     IRCChannelListWindow(BWindow* owner, BSecureSocket* targetSocket) 
@@ -385,7 +415,7 @@ private:
 
 class ChannelTreeItem : public BStringItem {
 public:
-    // Updated: Accept the configuration database index pointer reference on creation
+    // Accept the configuration database index pointer reference on creation
     ChannelTreeItem(const char* text, size_t serverIndex) 
         : BStringItem(text), fServerIndex(serverIndex), fHasUnread(false), fAutoJoin(false) {
         
@@ -423,17 +453,26 @@ public:
             owner->FillRect(itemRect, B_SOLID_LOW);
         }
 
-        // DYNAMIC FONT SWITCH: Pivot layout rendering engine based on unread data
+        // 1. DYNAMIC FONT: Read the current size from the parent view container
+        BFont dynamicFont;
+        owner->GetFont(&dynamicFont);
+
+        // DYNAMIC FONT SWITCH: Apply bold formatting face rules manually on our scale
         if (fHasUnread && !IsSelected()) {
-            owner->SetFont(be_bold_font);
-            // Highlight text with a subtle alternate attention color if desired
+            dynamicFont.SetFace(B_BOLD_FACE);
             owner->SetHighColor(ui_color(B_LINK_TEXT_COLOR)); 
         } else {
-            owner->SetFont(be_plain_font);
+            dynamicFont.SetFace(B_REGULAR_FACE);
         }
+        owner->SetFont(&dynamicFont);
 
-        // Render the raw character graphics onto the pane
-        owner->MovePenTo(itemRect.left + 4, itemRect.bottom - 2);
+        // 2. DYNAMIC SPACING FIX: Calculate vertical baseline metrics to avoid overlapping
+        font_height fh;
+        dynamicFont.GetHeight(&fh);
+        float textBaseline = itemRect.top + fh.ascent + (itemRect.Height() - (fh.ascent + fh.descent + fh.leading)) / 2.0f;
+        
+        // Indent channels to the right (e.g., 20 pixels) to distinguish them under server nodes
+        owner->MovePenTo(itemRect.left + 20, textBaseline);
         
         // Rebuild dynamic text string to add trailing tag helper
         BString displayString = Text();
@@ -443,6 +482,7 @@ public:
         owner->PopState();
     }
 
+
 private:
     size_t fServerIndex;
     bool fHasUnread;
@@ -450,13 +490,12 @@ private:
 };
 
 
-// Custom Tree Item to track network configuration state
 class ServerTreeItem : public BStringItem {
 public:
-    ServerTreeItem(const char* text, size_t configIndex) 
-        : BStringItem(text), fConfigIndex(configIndex) {
+    ServerTreeItem(const char* text, size_t configIndex, bool isChannel = false) 
+        : BStringItem(text), fConfigIndex(configIndex), fIsChannel(isChannel) {
         fAutoConnect = cfg.servers[fConfigIndex].autoConnect;
-        fAutoReconnect = cfg.servers[fConfigIndex].autoReconnect; // <- INITIALIZE HERE
+        fAutoReconnect = cfg.servers[fConfigIndex].autoReconnect;
     }
         
     BString GetHost() const { return BString(cfg.servers[fConfigIndex].host.c_str()); }
@@ -465,13 +504,16 @@ public:
     BString GetPass() const { return BString(cfg.servers[fConfigIndex].pass.c_str()); }
     size_t  GetIndex() const { return fConfigIndex; }
     std::vector<std::string> GetAutojoin() const { return cfg.servers[fConfigIndex].autojoin; }
+    
     bool IsAutoConnect() const { return fAutoConnect; }
     void SetAutoConnect(bool autoConnect) { fAutoConnect = autoConnect; }
-    
-    // Add these auto-reconnect tracking methods:
     bool IsAutoReconnect() const { return fAutoReconnect; }
     void SetAutoReconnect(bool autoReconnect) { fAutoReconnect = autoReconnect; }
+    bool IsHideStatus() const { return fHideStatus; }
+    void SetHideStatus(bool hide) { fHideStatus = hide; }
+    bool IsChannel() const { return fIsChannel; }
 
+    // FIXED: DrawItem that centers text and indents channels perfectly at any font size
     void DrawItem(BView* owner, BRect itemRect, bool drawEverything) override {
         owner->PushState();
         
@@ -485,12 +527,25 @@ public:
             owner->FillRect(itemRect, B_SOLID_LOW);
         }
 
-        owner->SetFont(be_plain_font);
-        owner->MovePenTo(itemRect.left + 4, itemRect.bottom - 2);
+        // Dynamically get the font scaling configuration applied to the parent tree
+        BFont dynamicFont;
+        owner->GetFont(&dynamicFont);
+        owner->SetFont(&dynamicFont);
+
+        // Dynamically calculate the vertical baseline using precise font metrics
+        font_height fh;
+        dynamicFont.GetHeight(&fh);
+        float textBaseline = itemRect.top + fh.ascent + (itemRect.Height() - (fh.ascent + fh.descent + fh.leading)) / 2.0f;
+        
+        // INDENT CHANNELS: Add padding to the left if this item is a channel node
+        float leftPadding = fIsChannel ? 24.0f : 4.0f;
+        owner->MovePenTo(itemRect.left + leftPadding, textBaseline);
         
         BString displayString = Text();
-        if (fAutoConnect) displayString << " [AC]";
-        if (fAutoReconnect) displayString << " [AR]"; // Dynamic Visual Indicator Flag
+        if (!fIsChannel) {
+            if (fAutoConnect) displayString << " [AC]";
+            if (fAutoReconnect) displayString << " [AR]"; 
+        }
         owner->DrawString(displayString.String());
 
         owner->PopState();
@@ -499,7 +554,167 @@ public:
 private:
     size_t fConfigIndex;
     bool fAutoConnect;
-    bool fAutoReconnect; // <- ADD THIS VARIABLE
+    bool fAutoReconnect;
+    bool fHideStatus = false;
+    bool fIsChannel; // Flag to separate drawing rules
+};
+
+
+
+
+
+class ServerConfigWindow : public BWindow {
+public:
+    virtual ~ServerConfigWindow() {}
+
+    ServerConfigWindow(BWindow* parent, ServerTreeItem* item, size_t serverIdx)
+        : BWindow(BRect(0, 0, 350, 320), "Server Properties", B_MODAL_WINDOW_LOOK, 
+                  B_MODAL_SUBSET_WINDOW_FEEL, B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_CLOSE_ON_ESCAPE) {
+        
+        fParentWindow = parent;
+        fItem = item;
+        fServerIdx = serverIdx;
+
+        AddToSubset(parent);
+        CenterIn(parent->Frame());
+
+        ServerConfig& srv = cfg.servers[fServerIdx];
+
+        fNickInput = new BTextControl("nick", "Nickname:", srv.nick.c_str(), nullptr);
+        fPassInput = new BTextControl("pass", "Password:", srv.pass.c_str(), nullptr);
+        fPassInput->TextView()->HideTyping(true); 
+
+        fServerListFontMenu = CreateFontMenu("Server List Font:", cfg.serverListFontSize);
+        fChatLogFontMenu    = CreateFontMenu("Chat Log Font:", cfg.chatLogFontSize);
+        fUserListFontMenu   = CreateFontMenu("User List Font:", cfg.userListFontSize);
+
+// Inside ServerConfigWindow Constructor:
+
+        fAutoConnectCheck = new BCheckBox("autoconnect", "Automatically connect at startup", nullptr);
+        fAutoConnectCheck->SetValue(srv.autoConnect ? B_CONTROL_ON : B_CONTROL_OFF);
+
+        fAutoReconnectCheck = new BCheckBox("autoreconnect", "Automatically reconnect on drop", nullptr);
+        fAutoReconnectCheck->SetValue(srv.autoReconnect ? B_CONTROL_ON : B_CONTROL_OFF);
+
+        fDebugEnableCheck = new BCheckBox("debug", "Enable low-level socket engine logs", nullptr);
+        fDebugEnableCheck->SetValue(cfg.debugEnable ? B_CONTROL_ON : B_CONTROL_OFF);
+
+        // NEW CODE: Instantiate the hide status check control button
+        fHideStatusCheck = new BCheckBox("hidestatus", "Hide channel status messages (Joins/Parts/Quits)", nullptr);
+        fHideStatusCheck->SetValue(srv.hideStatusMessages ? B_CONTROL_ON : B_CONTROL_OFF);
+
+        BButton* cancelBtn = new BButton("cancel", "Cancel", new BMessage('cfcn'));
+        BButton* saveBtn = new BButton("save", "Save", new BMessage('cfsv'));
+        saveBtn->MakeDefault(true);
+
+        // Update the layout builder chain to include the new toggle line below the font dropdown selectors
+        BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
+            .SetInsets(15)
+            .AddGrid(5.0f, 5.0f)
+                .Add(fNickInput->CreateLabelLayoutItem(), 0, 0)
+                .Add(fNickInput->CreateTextViewLayoutItem(), 1, 0)
+                .Add(fPassInput->CreateLabelLayoutItem(), 0, 1)
+                .Add(fPassInput->CreateTextViewLayoutItem(), 1, 1)
+                .Add(fServerListFontMenu->CreateLabelLayoutItem(), 0, 2)
+                .Add(fServerListFontMenu->CreateMenuBarLayoutItem(), 1, 2)
+                .Add(fChatLogFontMenu->CreateLabelLayoutItem(), 0, 3)
+                .Add(fChatLogFontMenu->CreateMenuBarLayoutItem(), 1, 3)
+                .Add(fUserListFontMenu->CreateLabelLayoutItem(), 0, 4)
+                .Add(fUserListFontMenu->CreateMenuBarLayoutItem(), 1, 4)
+            .End()
+            .Add(fAutoConnectCheck)
+            .Add(fAutoReconnectCheck)
+            .Add(fHideStatusCheck)      // <-- NEW: Render checkbox inline horizontally
+            // .Add(fDebugEnableCheck)
+            .AddGlue()
+            .AddGroup(B_HORIZONTAL, 10)
+                .AddGlue()
+                .Add(cancelBtn)
+                .Add(saveBtn)
+            .End();
+
+    }
+
+    // Moving the implementation body inline here resolves the linker vtable error
+    void MessageReceived(BMessage* message) override {
+        switch (message->what) {
+            case 'cfcn':
+                Quit();
+                break;
+                
+	        case 'cfsv': {
+            	ServerConfig& srv = cfg.servers[fServerIdx];
+            	srv.nick = fNickInput->Text();
+            	srv.pass = fPassInput->Text();
+            	srv.autoConnect = (fAutoConnectCheck->Value() == B_CONTROL_ON);
+            	srv.autoReconnect = (fAutoReconnectCheck->Value() == B_CONTROL_ON);
+            	cfg.debugEnable = (fDebugEnableCheck->Value() == B_CONTROL_ON);
+
+            	srv.hideStatusMessages = (fHideStatusCheck->Value() == B_CONTROL_ON);
+
+            	BMenuItem* item = fServerListFontMenu->Menu()->FindMarked();
+            	if (item && item->Message()) cfg.serverListFontSize = item->Message()->FindInt32("size");
+
+            	item = fChatLogFontMenu->Menu()->FindMarked();
+            	if (item && item->Message()) cfg.chatLogFontSize = item->Message()->FindInt32("size");
+
+            	item = fUserListFontMenu->Menu()->FindMarked();
+            	if (item && item->Message()) cfg.userListFontSize = item->Message()->FindInt32("size");
+
+            	if (fItem != nullptr) {
+                	fItem->SetAutoConnect(srv.autoConnect);
+                	fItem->SetAutoReconnect(srv.autoReconnect);
+                
+                	fItem->SetHideStatus(srv.hideStatusMessages);
+            	}
+
+            	BMessage updateNotify('mscf'); 
+            	if (fParentWindow) fParentWindow->PostMessage(&updateNotify);
+            
+            	Quit();
+            	break;
+        	}
+
+            default:
+                BWindow::MessageReceived(message);
+                break;
+        }
+    }
+
+private:
+    BWindow*            fParentWindow;
+    ServerTreeItem*     fItem;
+    size_t              fServerIdx;
+
+    BTextControl*       fNickInput;
+    BTextControl*       fPassInput;
+    BCheckBox*          fAutoConnectCheck;
+    BCheckBox*          fAutoReconnectCheck;
+    BCheckBox*          fDebugEnableCheck;
+	BCheckBox*          fHideStatusCheck;
+    BMenuField*         fServerListFontMenu;
+    BMenuField*         fChatLogFontMenu;
+    BMenuField*         fUserListFontMenu;
+
+    BMenuField* CreateFontMenu(const char* label, int32 currentSize) {
+        BPopUpMenu* menu = new BPopUpMenu(label);
+        int32 sizes[] = {9, 10, 11, 12, 14, 16, 18, 20, 24};
+        
+        for (int i = 0; i < 9; i++) {
+            BString sizeStr;
+            sizeStr << sizes[i];
+            
+            BMessage* msg = new BMessage('fntc');
+            msg->AddInt32("size", sizes[i]);
+            
+            BMenuItem* item = new BMenuItem(sizeStr.String(), msg);
+            if (sizes[i] == currentSize) {
+                item->SetMarked(true);
+            }
+            menu->AddItem(item);
+        }
+        return new BMenuField(label, label, menu);
+    }
 };
 
 
@@ -523,12 +738,17 @@ public:
 
         for (size_t i = 0; i < cfg.servers.size(); i++) {
             ServerTreeItem* serverNode = new ServerTreeItem(cfg.servers[i].name.c_str(), i);
+            
+            // Copy the loaded configuration values straight onto the UI tree items on boot!
+            serverNode->SetHideStatus(cfg.servers[i].hideStatusMessages);
+            
             fChannelTree->AddItem(serverNode);
             
             // Map structural lookups to our class reference tracking pointers
             if (i == 0) fLiberaNode = serverNode;
             if (i == 1) fOftcNode = serverNode;
         }
+
         
         // 3. Create Topic View bar Control
         fTopicView = new BTextControl("topic_view", "Topic:", "No topic set.", nullptr);
@@ -545,6 +765,30 @@ public:
         fInputControl = new BTextControl("input", "", "", new BMessage(MSG_SEND_MESSAGE));
         fConnectButton = new BButton("connect", "Join #Haiku!", new BMessage(MSG_START_SIRC));
 
+
+        // Apply saved font choices on startup
+        BFont initialFont;
+
+        // Apply Left Channel Tree Font Size
+        fChannelTree->GetFont(&initialFont);
+        initialFont.SetSize(cfg.serverListFontSize);
+        fChannelTree->SetFont(&initialFont);
+
+        // Apply Center Chat Text Area Font Size
+        fChatLog->GetFont(&initialFont);
+        initialFont.SetSize(cfg.chatLogFontSize);
+        fChatLog->SetFont(&initialFont);
+
+        // Apply Right User List Column Font Size
+        fUserList->GetFont(&initialFont);
+        initialFont.SetSize(cfg.userListFontSize);
+        fUserList->SetFont(&initialFont);
+        
+        // Apply Topic View Font Size from configurations file
+        fTopicView->GetFont(&initialFont);
+        initialFont.SetSize(cfg.chatLogFontSize);
+        fTopicView->SetFont(&initialFont);
+        fTopicView->TextView()->SetFontAndColor(&initialFont, B_FONT_SIZE);
 
 
         // 5. Layout Architecture using Adjustable Split Panes
@@ -571,6 +815,7 @@ public:
             .End();
 
 
+
         // 6. Initialize State Properties
         fChannelTree->SetSelectionMessage(new BMessage('slch'));
         fActiveBufferItem = nullptr;        
@@ -580,13 +825,22 @@ public:
         fOftcSocket = nullptr;
         fCurrentServerNode = nullptr;
         
+        // Maybe use this in the future
+        // query the specific context server's nickname string
+		// BString localEcho;
+		// localEcho << "<" << contextServer->GetNick() << "> " << text << "\n";
+
+        
         if (!cfg.servers.empty()) {
             fMyNick = cfg.servers[0].nick.c_str();
         } else {
-            fMyNick = "HaikuMultiUser";
+            // High-precision clock backup fallback to generate matching unique IDs anywhere
+            srand(static_cast<unsigned int>(real_time_clock_usecs()));
+            int randomSuffix = 1000 + (rand() % 9000);
+            fMyNick.SetToFormat("HaikuIRCUser%d", randomSuffix);
         }
         
-                // 7. Process Automatic Startup Connections instantly
+        // 7. Process Automatic Startup Connections instantly
         for (int32 i = 0; i < fChannelTree->CountItems(); i++) {
             ServerTreeItem* srvNode = dynamic_cast<ServerTreeItem*>(fChannelTree->ItemAt(i));
             if (srvNode != nullptr && srvNode->IsAutoConnect()) {
@@ -611,49 +865,83 @@ public:
 
 
 private:
-    void ShowContextMenu(BPoint screenPoint, ServerTreeItem* item) {
-        BPopUpMenu* menu = new BPopUpMenu("ServerOptions", false, false);
+	//@Menus
+    // Change parameter to BListItem* so it can accept both servers and channels
+    void ShowContextMenu(BPoint screenPoint, BListItem* item) {
+        if (item == nullptr) return; // Safety check
         
-        uint32 commandMsg = (item == fLiberaNode) ? MSG_CONNECT_LIBERA : MSG_CONNECT_OFTC;
-        menu->AddItem(new BMenuItem("Connect", new BMessage(commandMsg)));
-        menu->AddSeparatorItem();
+        // 1. Check if the right-clicked node is a child channel leaf
+        ChannelTreeItem* chanItem = dynamic_cast<ChannelTreeItem*>(item);
+        if (chanItem != nullptr) {
+            BPopUpMenu* menu = new BPopUpMenu("ChannelOptions", false, false);
+            
+            // Generate custom deletion code message token
+            BMessage* removeMsg = new BMessage('rmch'); 
+            removeMsg->AddPointer("channel_item", chanItem);
+            
+            menu->AddItem(new BMenuItem("Remove Channel", removeMsg));
+            menu->SetTargetForItems(this);
+            menu->Go(screenPoint, true, true, true);
+            return; // Exit out early since we handled the channel menu
+        }
 
-        // 1. Toggle Auto-Connect Option
-        BString toggleConnectLabel = item->IsAutoConnect() ? "Disable Auto-Connect" : "Enable Auto-Connect";
-        BMessage* toggleConnectMsg = new BMessage(MSG_TOGGLE_AUTOCONNECT);
-        toggleConnectMsg->AddPointer("server_item", item);
-        menu->AddItem(new BMenuItem(toggleConnectLabel.String(), toggleConnectMsg));
+        // 2. Check if the right-clicked node is a root server container header
+        ServerTreeItem* srvItem = dynamic_cast<ServerTreeItem*>(item);
+        if (srvItem != nullptr) {
+            BPopUpMenu* menu = new BPopUpMenu("ServerOptions", false, false);
+            
+            uint32 commandMsg = (srvItem == fLiberaNode) ? MSG_CONNECT_LIBERA : MSG_CONNECT_OFTC;
+            menu->AddItem(new BMenuItem("Connect", new BMessage(commandMsg)));
+            menu->AddSeparatorItem();
 
-        // NEW: Toggle Auto-Reconnect Option
-        BString toggleReconnectLabel = item->IsAutoReconnect() ? "Disable Auto-Reconnect" : "Enable Auto-Reconnect";
-        BMessage* toggleReconnectMsg = new BMessage(MSG_TOGGLE_AUTORECONNECT);
-        toggleReconnectMsg->AddPointer("server_item", item);
-        BMenuItem* reconnectMenuItem = new BMenuItem(toggleReconnectLabel.String(), toggleReconnectMsg);
-        if (item->IsAutoReconnect()) reconnectMenuItem->SetMarked(true);
-        menu->AddItem(reconnectMenuItem);
-        
-        // 2. Toggle Hidden Joins/Parts
-        BString toggleStatusLabel = cfg.hideStatusMessages ? "Show Status Messages" : "Hide Status Messages";
-        BMessage* toggleStatusMsg = new BMessage(MSG_TOGGLE_HIDE_STATUS);
-        toggleStatusMsg->AddPointer("server_item", item);
-        BMenuItem* statusMenuItem = new BMenuItem(toggleStatusLabel.String(), toggleStatusMsg);
-        if (cfg.hideStatusMessages) statusMenuItem->SetMarked(true);
-        menu->AddItem(statusMenuItem);
-        
-        // 3. Channel List Option
-        menu->AddSeparatorItem();
-        BMessage* listMsg = new BMessage(MSG_CONTEXT_CHAN_LIST);
-        listMsg->AddPointer("server_item", item);
-        menu->AddItem(new BMenuItem("Channel List", listMsg));
-        
-        // 4. About Option
-        menu->AddSeparatorItem();
-        BMessage* aboutMsg = new BMessage(MSG_CONTEXT_ABOUT);
-        menu->AddItem(new BMenuItem("About...", aboutMsg));
-        
-        menu->SetTargetForItems(this);
-        menu->Go(screenPoint, true, true, true);
+            // Toggle Auto-Connect Option
+            BString toggleConnectLabel = "Auto-Connect on Startup";
+            BMessage* toggleConnectMsg = new BMessage(MSG_TOGGLE_AUTOCONNECT);
+            toggleConnectMsg->AddPointer("server_item", srvItem);
+            BMenuItem* connectMenuItem = new BMenuItem(toggleConnectLabel.String(), toggleConnectMsg);
+            if (srvItem->IsAutoConnect()) connectMenuItem->SetMarked(true);
+            menu->AddItem(connectMenuItem);
+
+            // Toggle Auto-Reconnect Option
+            BString toggleReconnectLabel = srvItem->IsAutoReconnect() ? "Auto-Reconnect Enabled" : "Enable Auto-Reconnect";
+            BMessage* toggleReconnectMsg = new BMessage(MSG_TOGGLE_AUTORECONNECT);
+            toggleReconnectMsg->AddPointer("server_item", srvItem);
+            BMenuItem* reconnectMenuItem = new BMenuItem(toggleReconnectLabel.String(), toggleReconnectMsg);
+            if (srvItem->IsAutoReconnect()) reconnectMenuItem->SetMarked(true);
+            menu->AddItem(reconnectMenuItem);
+            
+            // Status Messages Suppression Option
+            BString toggleStatusLabel = srvItem->IsHideStatus() ? "Status Messages Hidden" : "Status Messages Visible";
+            BMessage* toggleStatusMsg = new BMessage(MSG_TOGGLE_HIDE_STATUS);
+            toggleStatusMsg->AddPointer("server_item", srvItem);
+            BMenuItem* statusMenuItem = new BMenuItem(toggleStatusLabel.String(), toggleStatusMsg);
+            if (srvItem->IsHideStatus()) statusMenuItem->SetMarked(true);
+            menu->AddItem(statusMenuItem);
+            
+            // Open specific server configuration window
+            menu->AddSeparatorItem();
+            BMessage* configMsg = new BMessage(MSG_CONTEXT_CONFIGURE_SERVER);
+            configMsg->AddPointer("server_item", srvItem);
+            menu->AddItem(new BMenuItem("Configure Server...", configMsg));
+            
+            // Channel List Option
+            menu->AddSeparatorItem();
+            BMessage* listMsg = new BMessage(MSG_CONTEXT_CHAN_LIST);
+            listMsg->AddPointer("server_item", srvItem);
+            menu->AddItem(new BMenuItem("Channel List", listMsg));
+            
+            // About Option
+            menu->AddSeparatorItem();
+            BMessage* aboutMsg = new BMessage(MSG_CONTEXT_ABOUT);
+            menu->AddItem(new BMenuItem("About...", aboutMsg));
+            
+            menu->SetTargetForItems(this);
+            menu->Go(screenPoint, true, true, true);
+        }
     }
+
+
+
 
 
 
@@ -693,21 +981,104 @@ private:
         }
     }
 
-
-
-
-     void LogToItemBuffer(BStringItem* itemNode, BString text) {
-        if (itemNode == nullptr) return;
+void LogToItemBuffer(BStringItem* itemNode, BString text) {
+    if (itemNode == nullptr) return;
+    
+    // Append text to the memory cache map
+    fTextBuffers[itemNode] << text;
+    
+    // If the user is actively viewing this specific leaf item, update the UI live
+    if (fActiveBufferItem == itemNode) {
+        // 1. Move selection cursor to the absolute end of the text log
+        int32 textLength = fChatLog->TextLength();
+        fChatLog->Select(textLength, textLength);
         
-        // Append text to the memory cache map
-        fTextBuffers[itemNode] << text;
+        // 2. Prepare our custom font variations based on your config size
+        BFont regularChatFont;
+        fChatLog->GetFont(&regularChatFont);
+        regularChatFont.SetSize(cfg.chatLogFontSize);
+        regularChatFont.SetFace(B_REGULAR_FACE);
+
+        BFont boldChatFont = regularChatFont;
+        boldChatFont.SetFace(B_BOLD_FACE);
+
+        BFont italicChatFont = regularChatFont;
+        italicChatFont.SetFace(B_ITALIC_FACE);
+
+        // Fetch current theme text color
+        rgb_color textColor = {255, 255, 255, 255}; // Default white fallback
+        fChatLog->GetFontAndColor(0, nullptr, &textColor);
+
+        // 3. FIXED: Find the brackets dynamically anywhere in the text line
+        int32 openingBracketIdx = text.FindFirst("<");
+        int32 closingBracketIdx = text.FindFirst("> ");
         
-        // If the user is actively viewing this specific leaf item, update the UI live
-        if (fActiveBufferItem == itemNode) {
-            fChatLog->Insert(text.String());
-            fChatLog->ScrollToSelection();
+        // Ensure both brackets exist and are in the correct sequence order
+        if (openingBracketIdx != B_ERROR && closingBracketIdx != B_ERROR && openingBracketIdx < closingBracketIdx) {
+            // Allocate a heap array sized for exactly 2 styling rules
+            size_t arraySize = sizeof(text_run_array) + sizeof(text_run);
+            text_run_array* runArray = (text_run_array*)malloc(arraySize);
+            
+            if (runArray != nullptr) {
+                runArray->count = 2;
+
+                // RUN 0: Everything up to the closing bracket is bold (Timestamps stay regular if before '<')
+                // To keep the timestamp regular, set the offset to the opening bracket position instead:
+                runArray->runs[0].offset = openingBracketIdx; 
+                runArray->runs[0].font = boldChatFont;
+                runArray->runs[0].color = textColor;
+
+                // RUN 1: Style the actual message body as regular text
+                int32 messageBodyStart = closingBracketIdx + 2; // Jump past "> "
+                runArray->runs[1].offset = messageBodyStart;
+                runArray->runs[1].font = regularChatFont;
+                runArray->runs[1].color = textColor;
+
+                fChatLog->Insert(text.String(), runArray);
+                free(runArray);
+            } else {
+                fChatLog->Insert(text.String());
+            }
+        } 
+        // INTERCEPTOR B: Match action string formatting (Checks anywhere or using a loose find)
+        else if (text.FindFirst("* ") != B_ERROR) {
+            text_run_array* actionRun = (text_run_array*)malloc(sizeof(text_run_array));
+            if (actionRun != nullptr) {
+                actionRun->count = 1;
+                actionRun->runs[0].offset = 0;
+                actionRun->runs[0].font = italicChatFont;
+                actionRun->runs[0].color = {168, 101, 235, 255}; // Purple action text
+
+                fChatLog->Insert(text.String(), actionRun);
+                free(actionRun);
+            } else {
+                fChatLog->Insert(text.String());
+            }
         }
+        // INTERCEPTOR C: System logs or fallback plain strings
+        else {
+            text_run_array* singleRun = (text_run_array*)malloc(sizeof(text_run_array));
+            if (singleRun != nullptr) {
+                singleRun->count = 1;
+                singleRun->runs[0].offset = 0;
+                singleRun->runs[0].font = regularChatFont;
+                singleRun->runs[0].color = textColor;
+
+                fChatLog->Insert(text.String(), singleRun);
+                free(singleRun);
+            } else {
+                fChatLog->Insert(text.String());
+            }
+        }
+        
+        // 4. Scroll down safely to show the new text
+        fChatLog->ScrollToSelection();
     }
+}
+
+
+
+
 
     BStringItem* FindServerLogNode(ServerTreeItem* serverNode) {
         if (!serverNode) return nullptr;
@@ -814,8 +1185,10 @@ private:
                     if (!userExists) {
                         fChannelUsers[chanNode]->AddItem(new BStringItem(userWhoJoined.String()));
                         
-                        // Suppress text using your plain-text log function
-                        if (!cfg.hideStatusMessages) {
+                        // Query active server node UI class wrapper instead of the global config
+                        bool hideStatusOnThisServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode->IsHideStatus() : false;
+                        
+                        if (!hideStatusOnThisServer) {
                             LogToItemBuffer(chanNode, BString("--> ") << userWhoJoined << " has joined " << channelJoined << "\n");
                         }
                         
@@ -823,6 +1196,7 @@ private:
                             RefreshUserListUI();
                         }
                     }
+
                 }
             }
             return;
@@ -890,8 +1264,10 @@ private:
                         if (itemTxt == userWhoLeft) {
                             fChannelUsers[chanNode]->RemoveItemAt(i);
                             
-                            // Suppress text using your plain-text log function
-                            if (!cfg.hideStatusMessages) {
+                            // Query your active server node class instead of the global configuration variable
+                            bool hideStatusOnThisServer = (fCurrentServerNode != nullptr) ? fCurrentServerNode->IsHideStatus() : false;
+                            
+                            if (!hideStatusOnThisServer) {
                                 BString partNotice = (command == "PART") ? "has left" : "has quit";
                                 LogToItemBuffer(chanNode, BString("<-- ") << userWhoLeft << " " << partNotice << " (" << trailing << ")\n");
                             }
@@ -901,6 +1277,7 @@ private:
                             }
                             break;
                         }
+
 
 
                     }
@@ -1039,7 +1416,7 @@ private:
 
 
 
-            if (command == "PRIVMSG" || command == "NOTICE") {
+        if (command == "PRIVMSG" || command == "NOTICE") {
             BString senderNick = prefix;
             int32 exclamIdx = senderNick.FindFirst("!");
             if (exclamIdx != B_ERROR) senderNick.Truncate(exclamIdx);
@@ -1083,9 +1460,26 @@ private:
                 }
             }
 
-            // Assemble final message layout string with time data prepended on the left
+            // Assemble final message layout string
             BString formattedMsg;
-            formattedMsg << timestampPrefix << "<" << senderNick << "> " << trailing << "\n";
+            formattedMsg << timestampPrefix;
+
+            // NEW INTERCEPTOR: Detect and format /me CTCP ACTION strings cleanly
+            if (command == "PRIVMSG" && (trailing.StartsWith("\x01" "ACTION ") || trailing.StartsWith("\1ACTION "))) { 
+                       
+                trailing.Remove(0, 8);
+                
+                // Strip out the trailing 0x01 delimiter block if it exists
+                if (trailing.EndsWith("\x01") || trailing.EndsWith("\1")) {
+                    trailing.Truncate(trailing.Length() - 1);
+                }
+                
+                // Format into Action style syntax: * Nick message
+                formattedMsg << "* " << senderNick << " " << trailing << "\n";
+            } else {
+                // Default format for standard chat room conversation
+                formattedMsg << "<" << senderNick << "> " << trailing << "\n";
+            }
 
             // AUTOMATION HOOK: Detect if NickServ is requesting authentication credentials
             if (senderNick.ICompare("NickServ") == 0 && trailing.IFindFirst("identify") != B_ERROR) {
@@ -1122,6 +1516,7 @@ private:
                 LogToItemBuffer(FindServerLogNode(fCurrentServerNode), formattedMsg);
             }
         }
+
         
         else if (trailing.Length() > 0) {
             // AUTOMATION HOOK FALLBACK: Intercept raw notices before registration fully establishes
@@ -1268,18 +1663,24 @@ public:
                             return; 
                         }
                         
-                        // NEW HOOK: Check if it's an adjustable dynamic room Channel Leaf Node
+                        // CHANNEL LEAF HOOK: Add the removal menu action right here
                         ChannelTreeItem* chanItem = dynamic_cast<ChannelTreeItem*>(generalItem);
                         if (chanItem != nullptr) {
                             BPopUpMenu* menu = new BPopUpMenu("ChannelOptions", false, false);
                             
-                            // Formulate labeled text item based on the active state inversion
+                            // 1. Keep your existing Auto-Join toggle option
                             BString label = chanItem->IsAutoJoin() ? "Disable Auto-Join" : "Enable Auto-Join";
-                            
                             BMessage* toggleMsg = new BMessage(MSG_TOGGLE_AUTOJOIN);
-                            toggleMsg->AddPointer("chan_item", chanItem); // Carry context reference pointers safely
-                            
+                            toggleMsg->AddPointer("chan_item", chanItem); 
                             menu->AddItem(new BMenuItem(label.String(), toggleMsg));
+                            
+                            // 2. FIXED: Append a separator and your new Remove Channel item
+                            menu->AddSeparatorItem();
+                            
+                            BMessage* removeMsg = new BMessage('rmch'); // Remove Channel token
+                            removeMsg->AddPointer("channel_item", chanItem);
+                            menu->AddItem(new BMenuItem("Remove Channel", removeMsg));
+                            
                             menu->SetTargetForItems(this);
                             menu->Go(fChannelTree->ConvertToScreen(point), true, true, true);
                             return;
@@ -1295,6 +1696,181 @@ public:
 	//@messagereceived
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
+        	
+    case 'rmch': { // Remove Channel action handler
+        ChannelTreeItem* chanItem = nullptr;
+        
+        if (message->FindPointer("channel_item", (void**)&chanItem) == B_OK && chanItem != nullptr) {
+            
+            // 1. Send network message to leave communication space gracefully if socket exists
+            ServerTreeItem* parentServer = static_cast<ServerTreeItem*>(fChannelTree->Superitem(chanItem));
+            if (parentServer != nullptr) {
+                BSecureSocket* activeSocket = (parentServer == fOftcNode) ? fOftcSocket : fLiberaSocket;
+                if (activeSocket != nullptr) {
+                    BString partCmd;
+                    partCmd << "PART " << chanItem->Text() << " :Channel removed by user\r\n";
+                    activeSocket->Write(partCmd.String(), partCmd.Length());
+                }
+                
+                // 2. Remove the channel name from the configuration's autojoin vector array
+                size_t serverIdx = parentServer->GetIndex();
+                if (serverIdx < cfg.servers.size()) {
+                    BString targetChanName(chanItem->Text());
+                    // Remove dynamic tracking suffix text tags if present (like " [A]") before matching
+                    int32 tagPos = targetChanName.FindFirst(" [");
+                    if (tagPos != B_ERROR) targetChanName.Truncate(tagPos);
+                    
+                    auto& autojoinVec = cfg.servers[serverIdx].autojoin;
+                    for (auto it = autojoinVec.begin(); it != autojoinVec.end(); ) {
+                        if (targetChanName.ICompare(it->c_str()) == 0) {
+                            it = autojoinVec.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                }
+            }
+
+            // 3. Wipe current chat logs from active memory views if we delete the room we are looking at
+            if (fActiveBufferItem == chanItem) {
+                fActiveBufferItem = nullptr;
+                fChatLog->SetText("");
+                fUserList->MakeEmpty();
+                fTopicView->SetText("No active channel buffer targeted.");
+            }
+            
+            fTextBuffers.erase(chanItem);
+            fChannelTopics.erase(chanItem);
+            
+            if (fChannelUsers.find(chanItem) != fChannelUsers.end()) {
+                delete fChannelUsers[chanItem];
+                fChannelUsers.erase(chanItem);
+            }
+
+            // 4. Safely drop the element out of the UI tree structure entirely
+            fChannelTree->RemoveItem(chanItem);
+            delete chanItem; // Safe memory heap clean up management 
+            
+            // 5. Save settings file to disk immediately
+            save_config();
+        }
+        break;
+    }
+
+        	
+    case 'mscf': {
+        save_config(); // Save new dimensions to configuration file
+
+        // 1. Update Server List Font AND recalculate item heights (Left panel)
+        BFont treeFont;
+        fChannelTree->GetFont(&treeFont);
+        treeFont.SetSize(cfg.serverListFontSize);
+        fChannelTree->SetFont(&treeFont);
+
+        int32 treeCount = fChannelTree->CountItems();
+        for (int32 i = 0; i < treeCount; i++) {
+            BListItem* item = fChannelTree->ItemAt(i);
+            if (item != nullptr) {
+                item->Update(fChannelTree, &treeFont);
+            }
+        }
+        fChannelTree->InvalidateLayout();
+        fChannelTree->Invalidate(); 
+
+        // 2. FIXED: Update Topic View Bar Font Size
+        BFont topicFont;
+        fTopicView->GetFont(&topicFont);
+        topicFont.SetSize(cfg.chatLogFontSize); // Make it match your chat log text size
+        fTopicView->SetFont(&topicFont);
+        fTopicView->TextView()->SetFontAndColor(&topicFont, B_FONT_SIZE); // Updates the editable region
+        fTopicView->InvalidateLayout();
+        fTopicView->Invalidate();
+
+        // 3. Clear and rebuild the BTextView history buffer (Center panel)
+        BFont chatFont;
+        fChatLog->GetFont(&chatFont);
+        chatFont.SetSize(cfg.chatLogFontSize);
+        fChatLog->SetFont(&chatFont);
+
+        BString temporaryTextBuffer(fChatLog->Text());
+        text_run_array* runArray = (text_run_array*)malloc(sizeof(text_run_array));
+        if (runArray != nullptr) {
+            runArray->count = 1;
+            runArray->runs[0].offset = 0;
+            runArray->runs[0].font = chatFont;
+            runArray->runs[0].color = {255, 255, 255, 255}; 
+            fChatLog->SetText("");
+            fChatLog->Insert(temporaryTextBuffer.String(), runArray);
+            free(runArray);
+        }
+        fChatLog->Invalidate();
+
+        // 4. Update User List Font AND recalculate item heights (Right panel)
+        BFont userFont;
+        fUserList->GetFont(&userFont);
+        userFont.SetSize(cfg.userListFontSize);
+        fUserList->SetFont(&userFont);
+
+        int32 userCount = fUserList->CountItems();
+        for (int32 i = 0; i < userCount; i++) {
+            BListItem* item = fUserList->ItemAt(i);
+            if (item != nullptr) {
+                item->Update(fUserList, &userFont);
+            }
+        }
+        fUserList->InvalidateLayout();
+        fUserList->Invalidate();
+
+        break;
+    }
+
+
+
+
+    case MSG_CONTEXT_CONFIGURE_SERVER: {
+        ServerTreeItem* item = nullptr;
+        if (message->FindPointer("server_item", (void**)&item) == B_OK && item != nullptr) {
+            
+            // Loop through your configuration vectors to map the correct active vector index block
+            size_t matchingIndex = 0;
+            bool found = false;
+            for (size_t i = 0; i < cfg.servers.size(); i++) {
+                // Check matching pointer trackers or structural node names
+                if ((item == fLiberaNode && i == 0) || (item == fOftcNode && i == 1)) {
+                    matchingIndex = i;
+                    found = true;
+                    break;
+                }
+            }
+            
+            // Fallback match check by string text comparison if custom server added
+            if(!found) {
+                for (size_t i = 0; i < cfg.servers.size(); i++) {
+                    if (cfg.servers[i].name == item->Text()) {
+                        matchingIndex = i;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            // Spawn the custom configuration layout panel cleanly
+            ServerConfigWindow* configWin = new ServerConfigWindow(this, item, matchingIndex);
+            configWin->Show();
+        }
+        break;
+    }
+
+/*
+    case MSG_SAVE_CONFIG_FILE: {
+        // Trigger your configuration save code to push updates straight to hard disk
+        save_config();
+        
+        // Push safe feedback notification directly into the active viewport
+        LogToItemBuffer(fActiveBufferItem, "System: Configuration updates successfully written to disk.\n");
+        break;
+    }
+*/
 
 
             case MSG_RECONNECT_SERVER: {
@@ -1356,30 +1932,31 @@ public:
             }
 
         	
-            case MSG_TOGGLE_HIDE_STATUS: {
-                void* ptr;
-                if (message->FindPointer("server_item", &ptr) == B_OK) {
-                    ServerTreeItem* serverItem = static_cast<ServerTreeItem*>(ptr);
-                    if (serverItem != nullptr) {
-                        // 1. Flip the state flag
-                        cfg.hideStatusMessages = !cfg.hideStatusMessages;
-                        
-                        // 2. Save back to your text file
-                        save_config();
-                        
-                        // 3. Print confirmation back to the active window in plain text
-                        BString feedbackNotice;
-                        if (cfg.hideStatusMessages) {
-                            feedbackNotice = "--- [Preferences] Suppressing channel JOIN, PART, and QUIT notifications.\n";
-                        } else {
-                            feedbackNotice = "--- [Preferences] Now displaying channel JOIN, PART, and QUIT notifications.\n";
-                        }
-                        
-                        LogToItemBuffer(fActiveBufferItem, feedbackNotice);
-                    }
-                }
-                break;
-            }
+		    case MSG_TOGGLE_HIDE_STATUS: {
+        		ServerTreeItem* item = nullptr;
+        		if (message->FindPointer("server_item", (void**)&item) == B_OK && item != nullptr) {
+            		// Flip the state inside the UI element
+            		bool newStatus = !item->IsHideStatus();
+            		item->SetHideStatus(newStatus);
+            
+            		BString itemText(item->Text());
+
+            		// Map the item to our active config vector slot
+            		for (size_t i = 0; i < cfg.servers.size(); i++) {
+               			// Use StartsWith to completely ignore any dynamic trailing tags like [AC] or [AR]
+                		if ((item == fLiberaNode && i == 0) || 
+                    		(item == fOftcNode && i == 1) || 
+                    		(itemText.StartsWith(cfg.servers[i].name.c_str()))) {
+                    
+                    		cfg.servers[i].hideStatusMessages = newStatus;
+                    		break;
+                		}
+            		}
+            		save_config(); 
+        		}
+        		break;
+    		}
+
 
         	
         	
@@ -1525,36 +2102,70 @@ public:
                             
                             // Restore the active user list including their channel modes!
                             if (fChannelUsers.find(fActiveBufferItem) != fChannelUsers.end()) {
-                                // FIX HERE: Directly retrieve the pointer from our map configuration table
                                 BObjectList<BStringItem, true>* users = fChannelUsers[fActiveBufferItem];
                                 
                                 if (users != nullptr) {
+                                    // Set up a baseline user font size tracker
+                                    BFont userListFont;
+                                    fUserList->GetFont(&userListFont);
+                                    userListFont.SetSize(cfg.userListFontSize);
+
                                     for (int32 i = 0; i < users->CountItems(); i++) {
                                         if (users->ItemAt(i) != nullptr) {
-                                            fUserList->AddItem(new BStringItem(users->ItemAt(i)->Text()));
+                                            BStringItem* newUserItem = new BStringItem(users->ItemAt(i)->Text());
+                                            fUserList->AddItem(newUserItem);
+                                            
+                                            // FIXED: Force individual user rows to calculate heights at your custom scale
+                                            newUserItem->Update(fUserList, &userListFont);
                                         }
                                     }
+                                    fUserList->InvalidateLayout();
+                                    fUserList->Invalidate();
                                 }
                             }
                         }
 
-
-                        // 3. Re-populate visible chat log panel buffer text
+                        // 3. FIXED: Re-populate visible chat log panel using your configuration dimensions
                         if (fTextBuffers.find(fActiveBufferItem) != fTextBuffers.end()) {
-                            // Ensure the canvas color profiles are locked in right before inserting text
-                            rgb_color currentThemeTextColor = ui_color(B_DOCUMENT_TEXT_COLOR);
-                            fChatLog->SetFontAndColor(be_plain_font, B_FONT_ALL, &currentThemeTextColor);
                             
-                            fChatLog->SetText(fTextBuffers[fActiveBufferItem].String());
+                            // Grab current container font parameters and force your layout configuration sizing
+                            BFont customChatFont;
+                            fChatLog->GetFont(&customChatFont);
+                            customChatFont.SetSize(cfg.chatLogFontSize);
+                            
+                            rgb_color currentThemeTextColor = ui_color(B_DOCUMENT_TEXT_COLOR);
+                            
+                            // DO NOT use be_plain_font here; pass your explicitly sized customChatFont
+                            fChatLog->SetFontAndColor(&customChatFont, B_FONT_ALL, &currentThemeTextColor);
+                            
+                            // Construct a heap-allocated run array map to uniformly enforce the size across history data
+                            text_run_array* historyRuns = (text_run_array*)malloc(sizeof(text_run_array));
+                            if (historyRuns != nullptr) {
+                                historyRuns->count = 1;
+                                historyRuns->runs[0].offset = 0;
+                                historyRuns->runs[0].font = customChatFont;
+                                historyRuns->runs[0].color = currentThemeTextColor;
+
+                                fChatLog->SetText("");
+                                fChatLog->Insert(fTextBuffers[fActiveBufferItem].String(), historyRuns);
+                                free(historyRuns);
+                            } else {
+                                fChatLog->SetText(fTextBuffers[fActiveBufferItem].String());
+                            }
                         } else {
                             fChatLog->SetText("");
                         }
+                        
+                        // Force the scrollbar viewport directly back down to the bottom
+                        int32 newLength = fChatLog->TextLength();
+                        fChatLog->Select(newLength, newLength);
                         fChatLog->ScrollToSelection();
 
                     }
                 }
                 break;
             }
+
 
 
         	
@@ -1603,8 +2214,44 @@ public:
                             BString commandLine = text;
                             commandLine.Remove(0, 1); // strip the '/'
                             
+                            // NEW INTERCEPTOR: Clear current buffer view and cache
+                            if (commandLine.ICompare("clear", 5) == 0) {
+                                if (fActiveBufferItem != nullptr) {
+                                    fTextBuffers[fActiveBufferItem] = "";
+                                    fChatLog->SetText("");
+                                }
+                            }
+                            // NEW INTERCEPTOR: Process outgoing /me actions
+                            else if (commandLine.ICompare("me ", 3) == 0) {
+                                commandLine.Remove(0, 3); // strip "me " keyword and space
+                                
+                                if (activeTarget.StartsWith("#") && commandLine.Length() > 0) {
+                                    // 1. Format into official outgoing IRC CTCP protocol format
+                                    // Separated to prevent hex sequence range warnings!
+                                    rawPayload << "PRIVMSG " << activeTarget << " :" "\x01" "ACTION " << commandLine << "\x01\r\n";
+                                    
+                                    // 2. Generate matching time prefix for consistent log rules
+                                    BString timestampPrefix = "";
+                                    bigtime_t currentTime = real_time_clock_usecs();
+                                    time_t rawTime = (time_t)(currentTime / 1000000);
+                                    struct tm* timeInfo = localtime(&rawTime);
+                                    if (timeInfo != nullptr) {
+                                        char timeBuffer[32];
+                                        strftime(timeBuffer, sizeof(timeBuffer), "[%H:%M] ", timeInfo);
+                                        timestampPrefix = timeBuffer;
+                                    }
+
+                                    // 3. Render your action locally
+                                    BString echoStr;
+                                    echoStr << timestampPrefix << "* " << fMyNick << " " << commandLine << "\n";
+                                    LogToItemBuffer(fActiveBufferItem, echoStr);
+                                } else {
+                                    BString warning = "System Error: You can only use /me actions inside a channel room leaf node.\n";
+                                    LogToItemBuffer(fActiveBufferItem, warning);
+                                }
+                            }
                             // Explicitly intercept "/msg <target> <message>" 
-                            if (commandLine.ICompare("msg ", 4) == 0) {
+                            else if (commandLine.ICompare("msg ", 4) == 0) {
                                 commandLine.Remove(0, 4); // strip "msg " keyword
                                 int32 firstSpace = commandLine.FindFirst(" ");
                                 
@@ -1659,6 +2306,8 @@ public:
 
 
 
+
+
             case MSG_IRC_RECEIVED: {
                 BString rawLine;
                 void* nodePtr;
@@ -1705,6 +2354,12 @@ private:
     
     IRCChannelListWindow* fActiveListWindow;
 
+    BMenuField*         fServerListFontMenu;
+    BMenuField*         fChatLogFontMenu;
+    BMenuField*         fUserListFontMenu;
+
+    BMenuField*         CreateFontMenu(const char* label, int32 currentSize);
+	BCheckBox*          fHideStatusCheck;
 	
 }; 
 
