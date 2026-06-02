@@ -15,8 +15,7 @@ provides {
 	$(NAME) = $(VERSION)-1
 }
 requires {
-	haiku
-	blink
+	haiku	
 }	
 urls {
 	"https://github.com/ablyssx74/hirc"
