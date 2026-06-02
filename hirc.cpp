@@ -2434,7 +2434,7 @@ public:
                 // Formulate the informational message body text
                 BString aboutText;
                 aboutText << "Haiku IRC Client (hirc)\n"
-                          << "Version 0.0.1\n"
+                          << "Version 0.0.4\n"
                 		  << "By Kris Beazley \"ablyss\"\n"
                 		  << "Copyright 2026 The MIT License\n\n"
 
