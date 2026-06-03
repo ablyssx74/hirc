@@ -51,7 +51,7 @@
 #include "nlohmann/json.hpp"
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuIRC (hirc) v.0.0.5 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuIRC (hirc) v.0.0.6 (Haiku OS)";
 }
 
 using json = nlohmann::json;

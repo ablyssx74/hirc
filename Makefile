@@ -2,7 +2,7 @@
 TARGET = hirc
 PACKAGE_DIR := build/package
 NAME = hirc
-VERSION = 0.0.5
+VERSION = 0.0.6
 
 # Target Arch
 UNAME_M := $(shell uname -p)
