@@ -10,7 +10,7 @@ resource app_version {
     long_info = "hirc 0.0.6 - A lightweight, multi-server IRC client."
 };
 
-resource app_flags B_SINGLE_LAUNCH;
+//resource app_flags B_SINGLE_LAUNCH;
 
 /* Dynamic Vector Drawing: Draws 'HoCat' text nodes */
 resource vector_icon {
