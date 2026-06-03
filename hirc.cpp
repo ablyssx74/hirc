@@ -64,16 +64,12 @@ struct ServerConfig {
     std::string pass;
     std::vector<std::string> autojoin; 
     bool autoConnect; 
-    bool hideStatusMessages = false; 
-    bool autoReconnect; 
-    int32 serverListFontSize = 12;
-    int32 chatLogFontSize = 12;
-    int32 userListFontSize = 12;
+    bool autoReconnect;
+    bool hideStatusMessages = false;  
 };
 
 struct Config {
     bool debugEnable = false;
-    bool hideStatusMessages = false; 
     std::vector<ServerConfig> servers;
     std::vector<ServerConfig> customServers; 
     int32 serverListFontSize = 12;
@@ -158,8 +154,7 @@ void save_config() {
 void load_config() {
     ensure_config_dir();
     cfg.debugEnable = false;
-    cfg.hideStatusMessages = false;     
- 
+
     cfg.servers.clear(); 
     cfg.customServers.clear();
 	
@@ -243,11 +238,6 @@ void load_config() {
         save_config(); 
     }
 }
-
-
-
-
-
 
 
 // Define application messages
@@ -2334,93 +2324,93 @@ public:
 
 
         	
-    case 'mscf': {
-        save_config(); // Save new dimensions to configuration file
+    	case 'mscf': {
+        	save_config(); // Save new dimensions to configuration file
 
-        // 1. Update Server List Font AND recalculate item heights (Left panel)
-        BFont treeFont;
-        fChannelTree->GetFont(&treeFont);
-        treeFont.SetSize(cfg.serverListFontSize);
-        fChannelTree->SetFont(&treeFont);
+        	// 1. Update Server List Font AND recalculate item heights (Left panel)
+        	BFont treeFont;
+        	fChannelTree->GetFont(&treeFont);
+        	treeFont.SetSize(cfg.serverListFontSize);
+        	fChannelTree->SetFont(&treeFont);
 
-        int32 treeCount = fChannelTree->CountItems();
-        for (int32 i = 0; i < treeCount; i++) {
-            BListItem* item = fChannelTree->ItemAt(i);
-            if (item != nullptr) {
-                item->Update(fChannelTree, &treeFont);
-            }
-        }
-        fChannelTree->InvalidateLayout();
-        fChannelTree->Invalidate(); 
+        	int32 treeCount = fChannelTree->CountItems();
+        	for (int32 i = 0; i < treeCount; i++) {
+            	BListItem* item = fChannelTree->ItemAt(i);
+            	if (item != nullptr) {
+                	item->Update(fChannelTree, &treeFont);
+            	}
+        	}
+        	fChannelTree->InvalidateLayout();
+        	fChannelTree->Invalidate(); 
 
-        // 2. FIXED: Update Topic View Bar Font Size
-        BFont topicFont;
-        fTopicView->GetFont(&topicFont);
-        topicFont.SetSize(cfg.chatLogFontSize); // Make chat log text size
-        fTopicView->SetFont(&topicFont);
-        fTopicView->TextView()->SetFontAndColor(&topicFont, B_FONT_SIZE); // Updates the editable region
-        fTopicView->InvalidateLayout();
-        fTopicView->Invalidate();
+        	// 2. FIXED: Update Topic View Bar Font Size
+        	BFont topicFont;
+        	fTopicView->GetFont(&topicFont);
+        	topicFont.SetSize(cfg.chatLogFontSize); // Make chat log text size
+        	fTopicView->SetFont(&topicFont);
+        	fTopicView->TextView()->SetFontAndColor(&topicFont, B_FONT_SIZE); // Updates the editable region
+        	fTopicView->InvalidateLayout();
+        	fTopicView->Invalidate();
 
-        // 3. Clear and rebuild the BTextView history buffer (Center panel)
-        BFont chatFont;
-        fChatLog->GetFont(&chatFont);
-        chatFont.SetSize(cfg.chatLogFontSize);
-        fChatLog->SetFont(&chatFont);
+        	// 3. Clear and rebuild the BTextView history buffer (Center panel)
+        	BFont chatFont;
+        	fChatLog->GetFont(&chatFont);
+        	chatFont.SetSize(cfg.chatLogFontSize);
+        	fChatLog->SetFont(&chatFont);
 
-        // Tell the text view to smoothly scale all characters to the new size
-        fChatLog->SetFontAndColor(&chatFont, B_FONT_SIZE); 
-        fChatLog->Invalidate();
-
-
-        BString temporaryTextBuffer(fChatLog->Text());
-        text_run_array* runArray = (text_run_array*)malloc(sizeof(text_run_array));
-        if (runArray != nullptr) {
-            runArray->count = 1;
-            runArray->runs[0].offset = 0;
-            runArray->runs[0].font = chatFont;
-            runArray->runs[0].color = {255, 255, 255, 255}; 
-            fChatLog->SetText("");
-            fChatLog->Insert(temporaryTextBuffer.String(), runArray);
-            free(runArray);
-        }
-        fChatLog->Invalidate();
-
-        // 4. Update User List Font AND recalculate item heights (Right panel)
-        BFont userFont;
-        fUserList->GetFont(&userFont);
-        userFont.SetSize(cfg.userListFontSize);
-        fUserList->SetFont(&userFont);
-
-        int32 userCount = fUserList->CountItems();
-        for (int32 i = 0; i < userCount; i++) {
-            BListItem* item = fUserList->ItemAt(i);
-            if (item != nullptr) {
-                item->Update(fUserList, &userFont);
-            }
-        }
-        fUserList->InvalidateLayout();
-        fUserList->Invalidate();
-
-        break;
-    }
+        	// Tell the text view to smoothly scale all characters to the new size
+        	fChatLog->SetFontAndColor(&chatFont, B_FONT_SIZE); 
+        	fChatLog->Invalidate();
 
 
+        	BString temporaryTextBuffer(fChatLog->Text());
+        	text_run_array* runArray = (text_run_array*)malloc(sizeof(text_run_array));
+        	if (runArray != nullptr) {
+            	runArray->count = 1;
+            	runArray->runs[0].offset = 0;
+            	runArray->runs[0].font = chatFont;
+            	runArray->runs[0].color = {255, 255, 255, 255}; 
+            	fChatLog->SetText("");
+            	fChatLog->Insert(temporaryTextBuffer.String(), runArray);
+            	free(runArray);
+        	}
+        	fChatLog->Invalidate();
+
+        	// 4. Update User List Font AND recalculate item heights (Right panel)
+        	BFont userFont;
+        	fUserList->GetFont(&userFont);
+        	userFont.SetSize(cfg.userListFontSize);
+        	fUserList->SetFont(&userFont);
+
+        	int32 userCount = fUserList->CountItems();
+        	for (int32 i = 0; i < userCount; i++) {
+            	BListItem* item = fUserList->ItemAt(i);
+            	if (item != nullptr) {
+                	item->Update(fUserList, &userFont);
+            	}
+        	}
+        	fUserList->InvalidateLayout();
+        	fUserList->Invalidate();
+
+        	break;
+    	}
 
 
-    case MSG_CONTEXT_CONFIGURE_SERVER: {
-        ServerTreeItem* item = nullptr;
-        if (message->FindPointer("server_item", (void**)&item) == B_OK && item != nullptr) {
+
+
+    	case MSG_CONTEXT_CONFIGURE_SERVER: {
+        	ServerTreeItem* item = nullptr;
+        	if (message->FindPointer("server_item", (void**)&item) == B_OK && item != nullptr) {
             
-            size_t matchingIndex = item->GetIndex(); // Extract the true index directly from the item!
-            bool isCustom = item->IsCustom();        // Extract whether it is custom or default
+            	size_t matchingIndex = item->GetIndex(); // Extract the true index directly from the item!
+            	bool isCustom = item->IsCustom();        // Extract whether it is custom or default
             
-            // Pass the custom flag as a new 4th argument to the dialog window constructor
-            ServerConfigWindow* configWin = new ServerConfigWindow(this, item, matchingIndex, isCustom);
-            configWin->Show();
-        }
-        break;
-    }
+            	// Pass the custom flag as a new 4th argument to the dialog window constructor
+            	ServerConfigWindow* configWin = new ServerConfigWindow(this, item, matchingIndex, isCustom);
+            	configWin->Show();
+        	}
+        	break;
+    	}
 
 
             case MSG_RECONNECT_SERVER: {
@@ -2506,8 +2496,6 @@ public:
         		}
         		break;
     		}
-
-
         	
         	
             case MSG_CONTEXT_CHAN_LIST: {
@@ -2747,15 +2735,13 @@ public:
                 break;
             }
 
-
             case MSG_CONNECT_CUSTOM_SERVER: { 
                 ServerTreeItem* customNode = nullptr;
                 if (message->FindPointer("server_item", (void**)&customNode) == B_OK && customNode != nullptr) {
                     ConnectToServer(customNode);
                 }
                 break;
-            }
-        	
+            }        	
         	
             case MSG_CONNECT_LIBERA:
                 ConnectToServer(fLiberaNode);
@@ -2915,7 +2901,7 @@ public:
                         fCurrentServerNode = static_cast<ServerTreeItem*>(nodePtr);
                     }
                     
-                    // FIXED: Forward the true context pointer explicitly down to the processing logic
+                    // Forward the true context pointer explicitly down to the processing logic
                     ParseAndDisplayIRC(rawLine, fCurrentServerNode);
                 }
                 break;
