@@ -804,13 +804,26 @@ public:
         AddToSubset(parent);
         CenterIn(parent->Frame());
 
-        // Dynamic config lookup helper prevents code duplication
         ServerConfig& srv = GetActiveConfig();
 
         fNickInput = new BTextControl("nick", "Nickname:", srv.nick.c_str(), nullptr);
-        fPassInput = new BTextControl("pass", "Password:", srv.pass.c_str(), nullptr);
-        fPassInput->TextView()->HideTyping(true); 
+        
+        // 1. Instantiate the input control blank initially
+        fPassInput = new BTextControl("pass", "Password:", "", nullptr);
+        
+        // 2. Extract a pointer to the inner native BTextView workspace 
+        BTextView* passTextView = fPassInput->TextView();
+        if (passTextView != nullptr) {
+            // Enable Haiku's built-in character masking
+            passTextView->HideTyping(true);
+        }
 
+        // 3. Set the text string buffer from your config structure
+        // Clearing and setting it after HideTyping ensures Haiku masks it on boot.
+        fPassInput->SetText(srv.pass.c_str());
+
+
+ 
         fServerListFontMenu = CreateFontMenu("Server List Font:", cfg.serverListFontSize);
         fChatLogFontMenu    = CreateFontMenu("Chat Log Font:", cfg.chatLogFontSize);
         fUserListFontMenu   = CreateFontMenu("User List Font:", cfg.userListFontSize);
@@ -862,9 +875,12 @@ public:
                 .Add(saveBtn)
             .End();
     }
+    
+    
 
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
+        	
             case 'cfcn':
                 Quit();
                 break;
@@ -873,6 +889,15 @@ public:
                 // Dynamically route data saving to the correct active vector configuration structure 
                 ServerConfig& srv = GetActiveConfig();
                 srv.nick = fNickInput->Text();
+                
+                // SAFETY GUARD: Only overwrite the password if the user actually typed something new.
+                // If the field is visually blank but they didn't touch it, preserve the loaded configuration string!
+                BString inputPassword = fPassInput->Text();
+                if (inputPassword.Length() > 0) {
+                    srv.pass = inputPassword.String();
+                }         
+                
+                
                 srv.pass = fPassInput->Text();
                 srv.autoConnect = (fAutoConnectCheck->Value() == B_CONTROL_ON);
                 srv.autoReconnect = (fAutoReconnectCheck->Value() == B_CONTROL_ON);
@@ -953,6 +978,43 @@ private:
         return new BMenuField(label, label, menu);
     }
 };
+
+
+
+// Sorts users by rank (@ on top, then +, then regular users), then alphabetically
+static int SortUsersByRank(const void* first, const void* second) {
+    const BListItem* itemPtrA = *static_cast<const BListItem* const*>(first);
+    const BListItem* itemPtrB = *static_cast<const BListItem* const*>(second);
+
+    const BStringItem* userA = dynamic_cast<const BStringItem*>(itemPtrA);
+    const BStringItem* userB = dynamic_cast<const BStringItem*>(itemPtrB);
+
+    if (userA == nullptr || userB == nullptr) return 0;
+
+    BString nameA(userA->Text());
+    BString nameB(userB->Text());
+
+    // 1. Assign numeric rank weights (higher numbers = higher priority)
+    int32 rankA = 0;
+    int32 rankB = 0;
+
+    if (nameA.StartsWith("@")) rankA = 2;
+    else if (nameA.StartsWith("+")) rankA = 1;
+
+    if (nameB.StartsWith("@")) rankB = 2;
+    else if (nameB.StartsWith("+")) rankB = 1;
+
+    // 2. If ranks are different, sort by rank weight descending
+    if (rankA != rankB) {
+        return (rankA > rankB) ? -1 : 1;
+    }
+
+    // 3. If ranks are identical, strip prefixes and sort alphabetically
+    if (rankA > 0) nameA.Remove(0, 1);
+    if (rankB > 0) nameB.Remove(0, 1);
+
+    return nameA.ICompare(nameB);
+}
 
 
 
@@ -1055,21 +1117,23 @@ public:
             .Add(chatScroll, 1.0)      // Chat logs stretch vertically
             .View();
 
-        // Pack the three components into the adjustable splitter handle container
-        mainSplitter->AddChild(channelScroll, 0.25f); // Left column (weight 25%)
-        mainSplitter->AddChild(centerStackView, 0.55f); // Center column (weight 55%)
-        mainSplitter->AddChild(userScroll, 0.20f);    // Right column (weight 20%)
+        mainSplitter->AddChild(channelScroll, 0.16f); // Left column weight (16%)
+        mainSplitter->AddChild(centerStackView, 0.73f); // Center column weight (73%)
+        mainSplitter->AddChild(userScroll, 0.11f);    // Right column weight (11%)
 
-        // Attach everything to the primary window builder container shell
+        channelScroll->SetExplicitPreferredSize(BSize(130, B_SIZE_UNLIMITED)); 
+        userScroll->SetExplicitPreferredSize(BSize(110, B_SIZE_UNLIMITED));    
+
         BLayoutBuilder::Group<>(this, B_VERTICAL, 5)
             .SetInsets(10)
             .Add(mainSplitter, 1.0) // Splitter stretches to fill the main window space
             .AddGroup(B_HORIZONTAL, 5, 0.0) // Bottom bar remains fixed
-                .Add(addServerButton, 0.0)   // Pins the "Add Server..." button on the far left
-                // REMOVED GLUE: Let the input control weight do the expansion work natively!
-                .Add(fInputControl, 1.0)     // Chat entry line automatically expands to fill the entire gap
-                .Add(fConnectButton, 0.0)    // Join button remains pinned on the far right
+                .Add(addServerButton, 0.0)   
+                .Add(fInputControl, 1.0)     
+                .Add(fConnectButton, 0.0)    
             .End();
+
+
 
 
 
@@ -1347,38 +1411,72 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
         rgb_color textColor = {255, 255, 255, 255}; // Default white fallback
         fChatLog->GetFontAndColor(0, nullptr, &textColor);
 
-        // 3. FIXED: Find the brackets dynamically anywhere in the text line
+        // 3. Find the brackets dynamically anywhere in the text line
         int32 openingBracketIdx = text.FindFirst("<");
         int32 closingBracketIdx = text.FindFirst("> ");
         
         // Ensure both brackets exist and are in the correct sequence order
         if (openingBracketIdx != B_ERROR && closingBracketIdx != B_ERROR && openingBracketIdx < closingBracketIdx) {
-            // Allocate a heap array sized for exactly 2 styling rules
-            size_t arraySize = sizeof(text_run_array) + sizeof(text_run);
-            text_run_array* runArray = (text_run_array*)malloc(arraySize);
             
-            if (runArray != nullptr) {
-                runArray->count = 2;
+            // DYNAMIC SWITCH: Determine if the line starts with a timestamp or starts immediately with the nickname
+            if (openingBracketIdx == 0) {
+                // PATTERN A: No timestamp. We only need 2 style rules total.
+                size_t arraySize = sizeof(text_run_array) + sizeof(text_run);
+                text_run_array* runArray = (text_run_array*)malloc(arraySize);
+                
+                if (runArray != nullptr) {
+                    runArray->count = 2;
+                    text_run* runs = &(runArray->runs[0]);
 
-                // RUN 0: Everything up to the closing bracket is bold (Timestamps stay regular if before '<')
-                // To keep the timestamp regular, set the offset to the opening bracket position instead:
-                runArray->runs[0].offset = openingBracketIdx; 
-                runArray->runs[0].font = boldChatFont;
-                runArray->runs[0].color = textColor;
+                    // RUN 0: Nickname is bold from the very start (index 0)
+                    runs[0].offset = 0;
+                    runs[0].font = boldChatFont;
+                    runs[0].color = textColor;
 
-                // RUN 1: Style the actual message body as regular text
-                int32 messageBodyStart = closingBracketIdx + 2; // Jump past "> "
-                runArray->runs[1].offset = messageBodyStart;
-                runArray->runs[1].font = regularChatFont;
-                runArray->runs[1].color = textColor;
+                    // RUN 1: Chat message body is regular text
+                    int32 messageBodyStart = closingBracketIdx + 2;
+                    runs[1].offset = messageBodyStart;
+                    runs[1].font = regularChatFont;
+                    runs[1].color = textColor;
 
-                fChatLog->Insert(text.String(), runArray);
-                free(runArray);
+                    fChatLog->Insert(text.String(), runArray);
+                    free(runArray);
+                } else {
+                    fChatLog->Insert(text.String());
+                }
             } else {
-                fChatLog->Insert(text.String());
+                // PATTERN B: Has a timestamp! We need 3 distinct style rules total.
+                size_t arraySize = sizeof(text_run_array) + (sizeof(text_run) * 2);
+                text_run_array* runArray = (text_run_array*)malloc(arraySize);
+                
+                if (runArray != nullptr) {
+                    runArray->count = 3;
+                    text_run* runs = &(runArray->runs[0]);
+
+                    // RUN 0: Timestamp text area renders regular
+                    runs[0].offset = 0;
+                    runs[0].font = regularChatFont;
+                    runs[0].color = textColor;
+
+                    // RUN 1: Swaps to bold font precisely where the nickname begins
+                    runs[1].offset = openingBracketIdx; 
+                    runs[1].font = boldChatFont;
+                    runs[1].color = textColor;
+
+                    // RUN 2: Swaps back to regular font for the message body
+                    int32 messageBodyStart = closingBracketIdx + 2;
+                    runs[2].offset = messageBodyStart;
+                    runs[2].font = regularChatFont;
+                    runs[2].color = textColor;
+
+                    fChatLog->Insert(text.String(), runArray);
+                    free(runArray);
+                } else {
+                    fChatLog->Insert(text.String());
+                }
             }
         } 
-        // INTERCEPTOR B: Match action string formatting (Checks anywhere or using a loose find)
+        // INTERCEPTOR B: Match action string formatting (* Nick message)
         else if (text.FindFirst("* ") != B_ERROR) {
             text_run_array* actionRun = (text_run_array*)malloc(sizeof(text_run_array));
             if (actionRun != nullptr) {
@@ -1418,6 +1516,7 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
 
 
 
+
     BStringItem* FindServerLogNode(ServerTreeItem* serverNode) {
         if (!serverNode) return nullptr;
         // Search through the immediate children of the server node to find "[Server]"
@@ -1445,15 +1544,37 @@ void LogToItemBuffer(BStringItem* itemNode, BString text) {
     void RefreshUserListUI() {
         // Only modify the UI list if we are currently looking at an active channel leaf node
         if (fActiveBufferItem != nullptr && BString(fActiveBufferItem->Text()).StartsWith("#")) {
-            fUserList->MakeEmpty();
+            
+            // FIXED: Explicitly delete every item inside fUserList to prevent a severe background memory leak
+            while (fUserList->CountItems() > 0) {
+                delete fUserList->RemoveItem((int32)0);
+            }
+
             if (fChannelUsers.find(fActiveBufferItem) != fChannelUsers.end()) {
                 BObjectList<BStringItem, true>* users = fChannelUsers[fActiveBufferItem];
                 if (users != nullptr) {
+                    
+                    // Set up a baseline user font size tracker for consistent row scale rendering
+                    BFont userListFont;
+                    fUserList->GetFont(&userListFont);
+                    userListFont.SetSize(cfg.userListFontSize);
+
                     for (int32 i = 0; i < users->CountItems(); i++) {
                         if (users->ItemAt(i) != nullptr) {
-                            fUserList->AddItem(new BStringItem(users->ItemAt(i)->Text()));
+                            BStringItem* newUserItem = new BStringItem(users->ItemAt(i)->Text());
+                            fUserList->AddItem(newUserItem);
+                            
+                            // Ensure the individual rows calculate heights at your custom scale instantly
+                            newUserItem->Update(fUserList, &userListFont);
                         }
                     }
+                    
+                    // FIXED: Execute the sort function exactly ONCE after the array is completely built!
+                    fUserList->SortItems(SortUsersByRank);
+                    
+                    // Force the interface views to refresh smoothly
+                    fUserList->InvalidateLayout();
+                    fUserList->Invalidate();
                 }
             }
         }
@@ -2702,6 +2823,9 @@ public:
                                             newUserItem->Update(fUserList, &userListFont);
                                         }
                                     }
+                                    // Sort Channel Operators
+                                    fUserList->SortItems(SortUsersByRank); 
+                                    
                                     fUserList->InvalidateLayout();
                                     fUserList->Invalidate();
                                 }
@@ -2734,6 +2858,7 @@ public:
                 }
                 break;
             }
+
 
             case MSG_CONNECT_CUSTOM_SERVER: { 
                 ServerTreeItem* customNode = nullptr;
