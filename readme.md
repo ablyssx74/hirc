@@ -1,7 +1,1 @@
-# cricket - A lightweight, multi-server IRC client.
-
-### Build x86_64
-```make release
-```
-
-### Screenshots
+This project has been rebranded and moved [here](https://github.com/ablyssx74/cricket)
