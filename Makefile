@@ -1,7 +1,7 @@
 # Target application name
-TARGET = hirc
+TARGET = cricket
 PACKAGE_DIR := build/package
-NAME = hirc
+NAME = cricket
 VERSION = 0.0.8
 
 # Target Arch
@@ -22,9 +22,9 @@ INCLUDE = -L/boot/system/lib
 endif
 
 # Source files, objects, and resources
-SRCS = hirc.cpp icons.cpp
+SRCS = cricket.cpp icons.cpp
 OBJS = $(SRCS:.cpp=.o)
-RDEFS = hirc.rdef
+RDEFS = cricket.rdef
 RSRCS = $(RDEFS:.rdef=.rsrc)
 
 # Haiku specific libraries

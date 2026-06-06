@@ -1,5 +1,5 @@
 /*
- * Copyright 2026, Kris Beazley hirc@epluribusunix.net
+ * Copyright 2026, Kris Beazley Cricket@epluribusunix.net
  * All rights reserved. Distributed under the terms of the MIT license.
  */
 
@@ -59,7 +59,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuIRC (hirc) v.0.0.8 (Haiku OS)";
+    static const char* const VERSION_STRING = "Cricket IRC Client v.0.0.8 (Haiku OS)";
 }
 
 using json = nlohmann::json;
@@ -98,7 +98,7 @@ int selectedConfig = 0;
 void ensure_config_dir() {
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
-        path.Append("hirc");
+        path.Append("cricket");
         create_directory(path.Path(), 0755);
     }
 }
@@ -169,7 +169,7 @@ void save_config() {
 
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
-        path.Append("hirc/hircConfig.txt");
+        path.Append("cricket/cricketConfig.txt");
         std::ofstream outfile(path.Path());
         if (outfile.is_open()) {
             outfile << j.dump(4);
@@ -191,12 +191,12 @@ void load_config() {
     bool mustSaveDefaults = false;
 
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
-        path.Append("hirc/hircConfig.txt");
+        path.Append("cricket/cricketConfig.txt");
         std::ifstream infile(path.Path());        
         if (infile.is_open()) {
             try {
                 json j = json::parse(infile);
-                cfg.quitMessage = j.value("quitMessage", "Haiku HIRC Client");
+                cfg.quitMessage = j.value("quitMessage", AppInfo::VERSION_STRING);
                 cfg.awayMessage = j.value("awayMessage", "I am away from my computer right now.");
                 cfg.debugEnable = j.value("debugEnable", false);             
                 cfg.serverListFontSize = j.value("serverListFontSize", (int32)12);
@@ -354,7 +354,7 @@ enum {
 
 
 // Forward Declarations 
-class HIRCWindow; 
+class CricketWindow; 
 class ServerTreeItem; 
 
 
@@ -1221,7 +1221,7 @@ static void LogDebugStream(const char* serverName, const char* direction, const 
 
     BPath path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) == B_OK) {
-        path.Append("hirc/hirc_debug_log.txt");
+        path.Append("cricket/cricket_debug_log.txt");
         
         // Open the file in output-append mode
         std::ofstream logFile(path.Path(), std::ios::out | std::ios::app);
@@ -1962,6 +1962,14 @@ public:
                 .Add(cancelBtn)
                 .Add(saveBtn)
             .End();
+            
+            
+    	if (parent) {
+        	CenterIn(parent->Frame()); 
+    		} else {
+        	CenterOnScreen(); 
+    	}
+
     }
     
     
@@ -2142,10 +2150,10 @@ static int SortUsersByRank(const void* first, const void* second) {
 
 
 
-class HIRCWindow : public BWindow {
+class CricketWindow : public BWindow {
 public:
     // --- Restore flexible window border decoration masks ---
-    HIRCWindow() : BWindow(BRect(100, 100, 900, 600), "Haiku IRC", 
+    CricketWindow() : BWindow(BRect(100, 100, 900, 600), "Cricket IRC Client", 
                         B_DOCUMENT_WINDOW, B_ASYNCHRONOUS_CONTROLS) {
         
 
@@ -2423,7 +2431,7 @@ void Show()
 
 
 
-    ~HIRCWindow() {
+    ~CricketWindow() {
         // 1. Prepare the custom sign-off message payload
         BString quitPayload;
         quitPayload << "QUIT :" << cfg.quitMessage.c_str() << "\r\n";
@@ -4172,7 +4180,7 @@ void ParseAndDisplayIRC(BString line, ServerTreeItem* contextServer) {
         ServerTreeItem* targetNode = static_cast<ServerTreeItem*>(data);
         if (targetNode == nullptr) return B_ERROR;
 
-        HIRCWindow* window = dynamic_cast<HIRCWindow*>(be_app->WindowAt(0));
+        CricketWindow* window = dynamic_cast<CricketWindow*>(be_app->WindowAt(0));
         if (window == nullptr) return B_ERROR;
 
         BNetworkAddress address(targetNode->GetHost().String(), targetNode->GetPort());
@@ -5134,7 +5142,7 @@ public:
                           << "custom spreadsheet channel list navigators, and dynamic dark mode adaptability.";
 
                 // Instantiate a native Haiku informational dialog modal box
-                BAlert* aboutAlert = new BAlert("About hirc", aboutText.String(), "OK", 
+                BAlert* aboutAlert = new BAlert("About Cricket", aboutText.String(), "OK", 
                                                 nullptr, nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
                 
                 // Instruct the alert modal box to float asynchronously so it doesn't freeze the main app loop
@@ -5163,7 +5171,7 @@ public:
                         }
             		}
             		
-            		// 3. Commit changes to hircConfig.txt JSON file instantly
+            		// 3. Commit changes to CricketConfig.txt JSON file instantly
             		save_config(); 
         		}
         		break;
@@ -5895,17 +5903,17 @@ private:
 
 }; 
 
-class HIRC : public BApplication {
+class Cricket : public BApplication {
 public:
-    HIRC() : BApplication("application/x-vnd.HIRC") {}
+    Cricket() : BApplication("application/x-vnd.Cricket") {}
     void ReadyToRun() override {
-        HIRCWindow* window = new HIRCWindow();
+        CricketWindow* window = new CricketWindow();
         window->Show();
     }
 };
 
 int main() {
-    HIRC app;
+    Cricket app;
     app.Run();
     return 0;
 }

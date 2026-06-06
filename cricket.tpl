@@ -1,9 +1,9 @@
 name			$(NAME)
 version			$(VERSION)-1
 architecture	$(ARCH)
-summary 		"hirc"
-description 	"hirc - A lightweight, multi-server IRC client."
-packager		"ablyss <hirc@epluribusunix.net>"
+summary 		"cricket"
+description 	"cricket - A lightweight, multi-server IRC client."
+packager		"ablyss <cricket@epluribusunix.net>"
 vendor			"epluribusunix.net Project"
 licenses {
 	"MIT"
