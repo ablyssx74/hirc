@@ -11,6 +11,8 @@
 #include <OS.h>
 #include <SupportKit.h>
 #include <Roster.h>
+#include <TranslationUtils.h> 
+#include <Slider.h> 
 
 // Storage, Path Finder & System File Kits
 #include <Directory.h>
@@ -18,10 +20,12 @@
 #include <FindDirectory.h>
 #include <NodeInfo.h>
 #include <Path.h>
+#include <FilePanel.h>
 
 // Vector Graphics & Interface Icons Elements
-// #include <IconUtils.h>   
-// #include <Bitmap.h>   
+#include <IconUtils.h>   
+#include "icons.h"
+#include <Bitmap.h>   
 
 // Interface Controls & Layout Managers
 #include <Button.h>
@@ -55,7 +59,7 @@
 
 
 namespace AppInfo {
-    static const char* const VERSION_STRING = "HaikuIRC (hirc) v.0.0.7 (Haiku OS)";
+    static const char* const VERSION_STRING = "HaikuIRC (hirc) v.0.0.8 (Haiku OS)";
 }
 
 using json = nlohmann::json;
@@ -71,7 +75,10 @@ struct ServerConfig {
     std::vector<std::string> autojoin; 
     bool autoConnect; 
     bool autoReconnect;
-    bool hideStatusMessages = false;  
+    bool hideStatusMessages = false;
+    bool enableEmoticons;    
+    std::string backgroundImagePath; 
+    int32 backgroundOpacity; 
 };
 
 struct Config {
@@ -121,6 +128,9 @@ void save_config() {
         s["autoConnect"] = srv.autoConnect; 
         s["autoReconnect"] = srv.autoReconnect;
         s["hideStatusMessages"] = srv.hideStatusMessages; 
+        s["background_image"] = srv.backgroundImagePath; 
+        s["bg_opacity"] = srv.backgroundOpacity; 
+        s["enable_emoticons"] = srv.enableEmoticons; 
         json ajArray = json::array();
         for (const auto& chan : srv.autojoin) {
             ajArray.push_back(chan);
@@ -145,6 +155,9 @@ void save_config() {
         s["autoConnect"] = srv.autoConnect; 
         s["autoReconnect"] = srv.autoReconnect;
         s["hideStatusMessages"] = srv.hideStatusMessages; 
+        s["background_image"] = srv.backgroundImagePath;
+        s["bg_opacity"] = srv.backgroundOpacity; 
+        s["enable_emoticons"] = srv.enableEmoticons;  
         json ajArray = json::array();
         for (const auto& chan : srv.autojoin) {
             ajArray.push_back(chan);
@@ -205,6 +218,9 @@ void load_config() {
                         srv.autoReconnect = s.value("autoReconnect", false); 
                         srv.autoConnect = s.value("autoConnect", false); 
                         srv.hideStatusMessages = s.value("hideStatusMessages", false);
+                        srv.backgroundImagePath = s.value("background_image", ""); 
+                        srv.backgroundOpacity = s.value("bg_opacity", 30); 
+                        srv.enableEmoticons = s.value("enable_emoticons", true); 
                         if (s.contains("autojoin") && s["autojoin"].is_array()) {
                             for (const auto& chan : s["autojoin"]) {
                                 srv.autojoin.push_back(chan.get<std::string>());
@@ -229,6 +245,9 @@ void load_config() {
                         srv.autoReconnect = s.value("autoReconnect", false); 
                         srv.autoConnect = s.value("autoConnect", false); 
                         srv.hideStatusMessages = s.value("hideStatusMessages", false);
+                        srv.backgroundImagePath = s.value("background_image", ""); 
+                        srv.backgroundOpacity = s.value("bg_opacity", 30); 
+                        srv.enableEmoticons = s.value("enable_emoticons", true); 
                         if (s.contains("autojoin") && s["autojoin"].is_array()) {
                             for (const auto& chan : s["autojoin"]) {
                                 srv.autojoin.push_back(chan.get<std::string>());
@@ -268,7 +287,10 @@ void load_config() {
         libera.autoConnect = false;
         libera.autoReconnect = false;
         libera.hideStatusMessages = false;
-
+		libera.backgroundImagePath = ""; 
+		libera.backgroundOpacity = 30; 
+		libera.enableEmoticons = true; 
+		 
         ServerConfig oftc;
         oftc.name = "OFTC";
         oftc.host = "irc.oftc.net";
@@ -281,6 +303,9 @@ void load_config() {
         oftc.autoConnect = false;
         oftc.autoReconnect = false;
         oftc.hideStatusMessages = false;
+        oftc.backgroundImagePath = ""; 
+        oftc.backgroundOpacity = 30; 
+        oftc.enableEmoticons = true; 
         
         cfg.servers.push_back(libera);
         cfg.servers.push_back(oftc);
@@ -322,6 +347,7 @@ enum {
 	MSG_CONTEXT_SET_AWAY = 'cxaw', 
 	MSG_USER_LIST_CONTEXT_CLICK = 'ulcx',
 	MSG_CONTEXT_PRIVMSG = 'cxpm',
+	MSG_EMOTE_CLICKED = 'emcl',
 
 };
 
@@ -330,6 +356,9 @@ enum {
 // Forward Declarations 
 class HIRCWindow; 
 class ServerTreeItem; 
+
+
+
 
 
 
@@ -376,14 +405,30 @@ private:
 };
 
 
-
+enum FragmentType {
+    FRAG_TEXT,
+    FRAG_ICON
+};
 
 // 1. Holds individual text slices after word-wrapping processing
 struct StyledRunFragment {
-    BString subText;
-    BFont font;
-    rgb_color color;
+    FragmentType type;
+    BString      subText;   
+    const uint8* iconData;  
+    BBitmap*     cachedBitmap; // <-- ADDED: Holds the pre-rendered bitmap asset
+    float        width;     
+    BFont        font;
+    rgb_color    color;
+
+    StyledRunFragment() : type(FRAG_TEXT), iconData(nullptr), cachedBitmap(nullptr), width(0.0f) {}
+    
+    // <-- ADDED: Guarantees leak-free automatic memory cleanup
+    ~StyledRunFragment() {
+        delete cachedBitmap; 
+    }
 };
+
+
 
 // 2. Holds the raw message, its raw style runs, and its calculated display rows
 struct StyledLine {
@@ -431,31 +476,266 @@ public:
     void SetLineHeight(float height);
     void RecalculateAllLineWraps();
     void SetActiveChannel(BStringItem* activeNode);
+    void SetBackgroundImage(const char* filePath);
+    void SetBackgroundDimming(int32 level); 
     virtual void MessageReceived(BMessage* message); 
     virtual void MouseMoved(BPoint point, uint32 transit, const BMessage* dragMessage) override;
 
 
 private:
+    void ParseTextAndIcons(const BString& text, const text_run_array* runs, BObjectList<StyledRunFragment, true>* rawFragments);
+    void ComputeWrapForLine(StyledLine* line, float maxWidth, BObjectList<StyledRunFragment, true>* rawFragments);
+    
     void ComputeWrapForLine(StyledLine* line, float maxWidth);
 	void UpdateScrollRange(bool scrollToBottom = false);
     BObjectList<StyledLine, true> fLines; 
     BStringItem*                  fActiveChannelNode;
     float                         fLineHeight;
+    BBitmap* fBackgroundBitmap;
+    int32    fBackgroundDimmingLevel; 
 };
+
 
 
 
 // Constructor
 // Update Constructor to handle initial default allocation state 
+// Constructor
+// Update Constructor to handle initial default allocation state 
 CustomChatView::CustomChatView(BRect frame, const char* name, uint32 resizingMode, uint32 flags)
     : BView(frame, name, resizingMode, flags | B_WILL_DRAW | B_FRAME_EVENTS | B_NAVIGABLE),
-      fLines(20) 
+      fLines(20),
+      fBackgroundBitmap(nullptr),
+      fBackgroundDimmingLevel(30) 
 {
     fLineHeight = 16.0; 
-    fActiveChannelNode = nullptr; // <-- ADDED
-    SetViewColor(ui_color(B_DOCUMENT_BACKGROUND_COLOR));
+    fActiveChannelNode = nullptr;
+    
+    // SetViewColor(ui_color(B_DOCUMENT_BACKGROUND_COLOR));
+    SetViewColor(B_TRANSPARENT_COLOR);
     SetLowColor(ui_color(B_DOCUMENT_BACKGROUND_COLOR));
 }
+
+
+
+void CustomChatView::ParseTextAndIcons(const BString& text, const text_run_array* runs, BObjectList<StyledRunFragment, true>* rawFragments)
+{
+    // --- NEW: RUNTIME TOGGLE ISOLATION RULE ---
+    bool emoticonsEnabled = true;
+    
+    // Look up whether the active view belongs to a default or user-added server configuration profile
+    // Uses the global index layout tracker variable "selectedConfig"
+    if (selectedConfig < (int)cfg.servers.size()) {
+        emoticonsEnabled = cfg.servers[selectedConfig].enableEmoticons;
+    } else {
+        int customIdx = selectedConfig - cfg.servers.size();
+        if (customIdx >= 0 && customIdx < (int)cfg.customServers.size()) {
+            emoticonsEnabled = cfg.customServers[customIdx].enableEmoticons;
+        }
+    }
+
+    // Fallback: If emoticons are turned off for this server, process the raw string as text and break instantly!
+    if (!emoticonsEnabled) {
+        int32 runCount = (runs != nullptr && runs->count > 0) ? runs->count : 1;
+        BFont baseFont;
+        GetFont(&baseFont);
+
+        for (int32 i = 0; i < runCount; i++) {
+            int32 startPos = (runs != nullptr) ? runs->runs[i].offset : 0;
+            int32 endPos = text.Length();
+            BFont runFont = baseFont;
+            rgb_color runColor = {255, 255, 255, 255};
+
+            if (runs != nullptr && runs->count > 0) {
+                runFont = runs->runs[i].font;
+                runColor = runs->runs[i].color;
+                if (i + 1 < runs->count) endPos = runs->runs[i+1].offset;
+            }
+
+            if (startPos >= text.Length() || endPos <= startPos) continue;
+
+            StyledRunFragment* frag = new StyledRunFragment();
+            frag->type = FRAG_TEXT;
+            text.CopyInto(frag->subText, startPos, endPos - startPos);
+            frag->font = runFont;
+            frag->color = runColor;
+            frag->width = runFont.StringWidth(frag->subText.String());
+            rawFragments->AddItem(frag);
+        }
+        return; // Exit early safely
+    }
+    
+    
+    struct EmoteMap { const char* trigger; const uint8* data; };
+    EmoteMap emotes[] = {
+        // --- HAPPY / SMILING / LAUGHING ---
+        {":)", (const uint8*)kIconSmile},      {":-)", (const uint8*)kIconSmile},
+        {"^^", (const uint8*)kIconCheerful},   {"^_^", (const uint8*)kIconCheerful},
+        {":D", (const uint8*)kIconLaughing},   {":-D", (const uint8*)kIconLaughing},
+        {":d", (const uint8*)kIconLaughing},   {"lol", (const uint8*)kIconLaughing},  
+        {"LOL", (const uint8*)kIconLaughing},
+
+        // --- SAD / FROWNING / ANNOYED ---
+        {":|", (const uint8*)kIconConfused},   {":-|", (const uint8*)kIconConfused},
+        {":/", (const uint8*)kIconConfused},   {":-\\", (const uint8*)kIconConfused},
+        {"o_O", (const uint8*)kIconConfused},  {"O_o", (const uint8*)kIconConfused},
+        {":(", (const uint8*)kIconFrown},      {":-(", (const uint8*)kIconFrown},
+        {">_ <", (const uint8*)kIconAnnoyed},  {">_(", (const uint8*)kIconAnnoyed},
+        {">_<", (const uint8*)kIconAnnoyed},
+
+        // --- CRYING / SCONXT ---
+        {";'(", (const uint8*)kIconCrying},    {";-'(", (const uint8*)kIconCrying},
+        {"T_T", (const uint8*)kIconCrying},    {";_;", (const uint8*)kIconCrying},
+
+        // --- WINKING / PLAYFUL TONGUE ---
+        {";)", (const uint8*)kIconWink},       {";-)", (const uint8*)kIconWink},
+        {":P", (const uint8*)kIconTongue},     {":p", (const uint8*)kIconTongue},
+        {":-P", (const uint8*)kIconTongue},    {":-p", (const uint8*)kIconTongue},
+
+        // --- SHOCK / ASTONISHED / SURPRISED ---
+        {":o", (const uint8*)kIconAstonished}, {":O", (const uint8*)kIconAstonished},
+        {":-o", (const uint8*)kIconAstonished},{":-O", (const uint8*)kIconAstonished},
+        {":0", (const uint8*)kIconAstonished}, {":-0", (const uint8*)kIconAstonished},
+        {"O_O", (const uint8*)kIconWideeyed},  {"o_o", (const uint8*)kIconWideeyed},
+
+        // --- COOL / SUNGLASSES ---
+        {"8-)", (const uint8*)kIconSunglasses}, {"B)", (const uint8*)kIconSunglasses},
+        {"8)", (const uint8*)kIconSunglasses},  {"b)", (const uint8*)kIconSunglasses},
+
+        // --- MISC ROMANTIC / SECRETS ---
+        {"<3", (const uint8*)kIconHeart},       {":*", (const uint8*)kIconKiss},       
+        {":-*", (const uint8*)kIconKiss},       {":X", (const uint8*)kIconFrown},      
+        {":x", (const uint8*)kIconFrown}
+    };
+    // FIX A: Correctly divide by the size of a single row element slot
+    int32 emoteCount = sizeof(emotes) / sizeof(emotes[0]);
+
+    BFont baseFont;
+    GetFont(&baseFont);
+    
+    int32 runCount = (runs != nullptr && runs->count > 0) ? runs->count : 1;
+    
+    for (int32 i = 0; i < runCount; i++) {
+        int32 startPos = 0;
+        int32 endPos = text.Length();
+        
+        BFont runFont = baseFont;
+        rgb_color runColor = {255, 255, 255, 255}; 
+        
+        if (runs != nullptr && runs->count > 0) {
+            startPos = runs->runs[i].offset;
+            runFont = runs->runs[i].font;
+            runColor = runs->runs[i].color;
+            
+            if (i + 1 < runs->count) {
+                endPos = runs->runs[i+1].offset;
+            }
+        }
+        
+        if (startPos >= text.Length() || endPos <= startPos) {
+            continue;
+        }
+
+        BString runText;
+        text.CopyInto(runText, startPos, endPos - startPos);
+        
+        int32 currentPos = 0;
+        int32 runLength = runText.Length();
+        
+        while (currentPos < runLength) {
+            int32 nextTrigger = runLength;
+            int32 triggerLength = 0;
+            const uint8* foundIcon = nullptr;
+            
+            for (int32 e = 0; e < emoteCount; e++) {
+                int32 pos = runText.FindFirst(emotes[e].trigger, currentPos);
+                if (pos != B_ERROR && pos < nextTrigger) {
+                    
+                    bool isValidMatch = true;
+                    int32 trigLen = strlen(emotes[e].trigger);
+                    
+                    // FIX B: Only run the timestamp filter if the trigger begins with a colon!
+                    if (emotes[e].trigger[0] == ':' && pos + 1 < runLength) {
+                        char nextChar = runText.ByteAt(pos + 1);
+                        if (isdigit(nextChar)) {
+                            isValidMatch = false;
+                        }
+                    }
+
+                    // Word boundary isolation filters
+                    if (isValidMatch && pos > 0) {
+                        char prevChar = runText.ByteAt(pos - 1);
+                        if (isalnum(prevChar) || prevChar == '/') {
+                            isValidMatch = false;
+                        }
+                    }
+                    if (isValidMatch && (pos + trigLen < runLength)) {
+                        char nextChar = runText.ByteAt(pos + trigLen);
+                        if (isalnum(nextChar) || nextChar == '/') {
+                            isValidMatch = false;
+                        }
+                    }
+                    
+                    if (isValidMatch) {
+                        nextTrigger = pos;
+                        triggerLength = trigLen;
+                        foundIcon = emotes[e].data;
+                    }
+                }
+            }
+            
+            if (foundIcon != nullptr) {
+                if (nextTrigger > currentPos) {
+                    StyledRunFragment* frag = new StyledRunFragment();
+                    frag->type = FRAG_TEXT;
+                    runText.CopyInto(frag->subText, currentPos, nextTrigger - currentPos);
+                    frag->font = runFont;
+                    frag->color = runColor;
+                    frag->width = runFont.StringWidth(frag->subText.String());
+                    rawFragments->AddItem(frag);
+                }
+                
+                StyledRunFragment* frag = new StyledRunFragment();
+                frag->type = FRAG_ICON;
+                frag->iconData = foundIcon;
+                frag->font = runFont;
+                frag->color = runColor;
+                frag->width = fLineHeight; 
+
+                BRect renderBounds(0, 0, fLineHeight, fLineHeight);
+                frag->cachedBitmap = new BBitmap(renderBounds, B_RGBA32);
+                if (BIconUtils::GetVectorIcon(frag->iconData, 8192, frag->cachedBitmap) != B_OK) {
+                    delete frag->cachedBitmap;
+                    frag->cachedBitmap = nullptr;
+                }
+                
+                rawFragments->AddItem(frag);
+                currentPos = nextTrigger + triggerLength;
+            } else {
+                if (currentPos < runLength) {
+                    StyledRunFragment* frag = new StyledRunFragment();
+                    frag->type = FRAG_TEXT;
+                    runText.CopyInto(frag->subText, currentPos, runLength - currentPos);
+                    frag->font = runFont;
+                    frag->color = runColor;
+                    frag->width = runFont.StringWidth(frag->subText.String());
+                    rawFragments->AddItem(frag);
+                }
+                break;
+            }
+        }
+    }
+}
+
+
+void CustomChatView::SetBackgroundDimming(int32 level)
+{
+    fBackgroundDimmingLevel = level;
+    if (fBackgroundDimmingLevel < 0) fBackgroundDimmingLevel = 0;
+    if (fBackgroundDimmingLevel > 100) fBackgroundDimmingLevel = 100;
+    Invalidate(); // Refresh canvas
+}
+
 void CustomChatView::ClearAllLines() {
     fLines.MakeEmpty();
     Invalidate();
@@ -474,6 +754,7 @@ void CustomChatView::FrameResized(float newWidth, float newHeight) {
 }
 
 CustomChatView::~CustomChatView() {
+	delete fBackgroundBitmap; 
     fLines.MakeEmpty();
 }
 // Pipeline Line Addition Point
@@ -488,25 +769,43 @@ void CustomChatView::AddStyledLine(BStringItem* itemNode, const BString& text, c
     if (itemNode == fActiveChannelNode) {
         float maxWidth = Bounds().Width() - 20.0f;
         if (maxWidth <= 50.0f) maxWidth = 50.0f;
-        ComputeWrapForLine(newLine, maxWidth);
+
+        // Build a temporary flat collection of fragments (Text + Emotes mixed)
+        BObjectList<StyledRunFragment, true> rawFragments(10);
+        ParseTextAndIcons(text, runs, &rawFragments);
+
+        // Compute the wrap based on those parsed tokens
+        ComputeWrapForLine(newLine, maxWidth, &rawFragments);
+        
         UpdateScrollRange(true); 
         Invalidate();
     }
 }
 
+
 // Update Loop Filter Pass
-void CustomChatView::RecalculateAllLineWraps() {
+void CustomChatView::RecalculateAllLineWraps()
+{
     float maxWidth = Bounds().Width() - 20.0f;
     if (maxWidth <= 50.0f) maxWidth = 50.0f;
 
     for (int32 i = 0; i < fLines.CountItems(); i++) {
         StyledLine* line = fLines.ItemAt(i);
-        // <-- Only recompute layout structures for lines matching the active view room!
-        if (line != nullptr && line->itemNode == fActiveChannelNode) {
-            ComputeWrapForLine(line, maxWidth);
+        
+        // Only spend CPU resources layout-wrapping lines for the active view context
+        if (line->itemNode == fActiveChannelNode) {
+            // Re-parse the text and icons into fresh fragments for wrapping
+            BObjectList<StyledRunFragment, true> rawFragments(10);
+            ParseTextAndIcons(line->text, line->runs, &rawFragments);
+
+            // Call the updated 3-parameter function signature
+            ComputeWrapForLine(line, maxWidth, &rawFragments);
         }
     }
+    UpdateScrollRange(false);
+    Invalidate();
 }
+
 
 void CustomChatView::UpdateScrollRange(bool scrollToBottom) {
     // 1. Locate the vertical scrollbar attached to our view parent frame container
@@ -547,114 +846,69 @@ void CustomChatView::UpdateScrollRange(bool scrollToBottom) {
 }
 
 
-// Core Word Wrapping Engine Math Pass
-void CustomChatView::ComputeWrapForLine(StyledLine* line, float maxWidth) {
+void CustomChatView::ComputeWrapForLine(StyledLine* line, float maxWidth, BObjectList<StyledRunFragment, true>* rawFragments)
+{
+    if (line == nullptr) 
+        return;
+        
     line->wrappedRows.MakeEmpty();
 
-    int32 textLen = line->text.Length();
-    if (textLen == 0) return;
+    if (maxWidth <= 0 || rawFragments == nullptr || rawFragments->IsEmpty()) 
+        return;
 
-    // Open our initial text line row container
     BObjectList<StyledRunFragment, true>* currentRow = new BObjectList<StyledRunFragment, true>(5);
-    line->wrappedRows.AddItem(currentRow);
-
     float currentX = 0.0f;
-    int32 runIdx = 0;
-    int32 currentOffset = 0;
 
-    // Layout configuration fallback states
-    BFont currentFont;
-    GetFont(&currentFont);
-    currentFont.SetSize(cfg.chatLogFontSize);
-    rgb_color currentColor = {255, 255, 255, 255};
-
-    while (currentOffset < textLen) {
-        // Intercept style run boundaries matching current cursor offsets
-        if (line->runs != nullptr && runIdx < line->runs->count) {
-            if (currentOffset >= line->runs->runs[runIdx].offset) {
-                currentFont = line->runs->runs[runIdx].font;
-                currentFont.SetSize(cfg.chatLogFontSize); // Sync dynamic font scale preferences
-                currentColor = line->runs->runs[runIdx].color;
-                runIdx++;
-            }
-        }
-
-        // Trace where this unique style segment shifts to something else
-        int32 nextRunBoundary = textLen;
-        if (line->runs != nullptr && runIdx < line->runs->count) {
-            nextRunBoundary = line->runs->runs[runIdx].offset;
-        }
-
-        BString runText;
-        line->text.CopyInto(runText, currentOffset, nextRunBoundary - currentOffset);
-        SetFont(&currentFont);
-
-        int32 chunkOffset = 0;
-        int32 chunkLen = runText.Length();
-
-        while (chunkOffset < chunkLen) {
-            // Segment string slice fragments by empty spaces
-            int32 spaceIdx = runText.FindFirst(" ", chunkOffset);
-            int32 wordEnd = (spaceIdx == B_ERROR) ? chunkLen : spaceIdx + 1;
-
-            BString word;
-            runText.CopyInto(word, chunkOffset, wordEnd - chunkOffset);
-            float wordWidth = StringWidth(word.String());
-
-            // EDGE CASE: If a single massive string has zero spaces and eclipses maxWidth, force-break it char-by-char
-            if (wordWidth > maxWidth && currentX == 0.0f) {
-                int32 charsTaken = 0;
-                while (charsTaken < word.Length()) {
-                    BString subWord;
-                    word.CopyInto(subWord, charsTaken, 1);
-                    float charW = StringWidth(subWord.String());
-                    
-                    if (currentX + charW > maxWidth && currentX > 0.0f) {
-                        currentRow = new BObjectList<StyledRunFragment, true>(5);
-                        line->wrappedRows.AddItem(currentRow);
-                        currentX = 0.0f;
-                    }
-                    
-                    StyledRunFragment* frag = new StyledRunFragment();
-                    frag->subText = subWord;
-                    frag->font = currentFont;
-                    frag->color = currentColor;
-                    currentRow->AddItem(frag);
-                    
-                    currentX += charW;
-                    charsTaken++;
-                }
-                chunkOffset += wordEnd - chunkOffset;
-                continue;
-            }
-
-            // Wrapping trigger condition
-            if (currentX + wordWidth > maxWidth) {
-                currentRow = new BObjectList<StyledRunFragment, true>(5);
-                line->wrappedRows.AddItem(currentRow);
-                currentX = 0.0f;
-
-                // Strip leading spacer spaces on wrapped lines for crisp left alignment
-                if (word.StartsWith(" ")) {
-                    word.Remove(0, 1);
-                    wordWidth = StringWidth(word.String());
-                }
-            }
-
-            // Commit tokenized fragment to active display line row cache
-            StyledRunFragment* frag = new StyledRunFragment();
-            frag->subText = word;
-            frag->font = currentFont;
-            frag->color = currentColor;
+    while (!rawFragments->IsEmpty()) {
+        StyledRunFragment* frag = rawFragments->RemoveItemAt(0);
+        
+        if (frag->type == FRAG_ICON || currentX + frag->width <= maxWidth) {
             currentRow->AddItem(frag);
-
-            currentX += wordWidth;
-            chunkOffset += word.Length();
+            currentX += frag->width;
+        } else {
+            BFont font = frag->font;
+            float availableWidth = maxWidth - currentX;
+            int32 charCount = 0;
+            int32 textLen = frag->subText.Length();
+            const char* rawStr = frag->subText.String();
+            
+            // High-performance string measurement boundary check using byte lengths directly
+            for (int32 c = 1; c <= textLen; c++) {
+                if (font.StringWidth(rawStr, c) <= availableWidth) {
+                    charCount = c;
+                } else {
+                    break;
+                }
+            }
+            
+            if (charCount > 0) {
+                StyledRunFragment* leftPart = new StyledRunFragment();
+                leftPart->type = FRAG_TEXT;
+                leftPart->font = frag->font;
+                leftPart->color = frag->color;
+                frag->subText.CopyInto(leftPart->subText, 0, charCount);
+                leftPart->width = font.StringWidth(leftPart->subText.String());
+                currentRow->AddItem(leftPart);
+                
+                frag->subText.Remove(0, charCount);
+                frag->width = font.StringWidth(frag->subText.String());
+            }
+            
+            line->wrappedRows.AddItem(currentRow);
+            
+            currentRow = new BObjectList<StyledRunFragment, true>(5);
+            currentRow->AddItem(frag);
+            currentX = frag->width;
         }
-
-        currentOffset = nextRunBoundary;
+    }
+    
+    if (!currentRow->IsEmpty()) {
+        line->wrappedRows.AddItem(currentRow);
+    } else {
+        delete currentRow;
     }
 }
+
 
 
 
@@ -711,18 +965,39 @@ void CustomChatView::MessageReceived(BMessage* message) {
 }
 
 
-// High-Performance Adaptive Render Pass with Channel Filtering Isolation
 void CustomChatView::Draw(BRect updateRect) {
     rgb_color systemBgColor = ui_color(B_DOCUMENT_BACKGROUND_COLOR);
     rgb_color systemTextColor = ui_color(B_DOCUMENT_TEXT_COLOR);
 
-    SetHighColor(systemBgColor); 
-    FillRect(updateRect); 
+    // --- BRANCH A: SCALED CUSTOM BACKGROUND REFRESH ---
+    if (fBackgroundBitmap != nullptr) {
+        SetDrawingMode(B_OP_COPY);
+        DrawBitmap(fBackgroundBitmap, Bounds());
 
-    // Start painting from absolute document origin layout limits ---
-    // In Haiku, tracking text rows correctly across scrolled canvases requires starting 
-    // baseline math at 10.0f and tracking heights cumulatively.
+        // --- NEW: HIGH-PERFORMANCE DIMMING OVERLAY PASS ---
+        if (fBackgroundDimmingLevel > 0) {
+            // Calculate alpha value (0 to 255) based on the slider percentage scale
+            uint8 alphaIntensity = (uint8)((fBackgroundDimmingLevel / 100.0f) * 255.0f);
+            
+            // Generate a transparent black tint color overlay layout block
+            rgb_color dimColor = { 0, 0, 0, alphaIntensity };
+            
+            SetHighColor(dimColor);
+            SetDrawingMode(B_OP_ALPHA); // Enforce hardware transparency blending pass
+            FillRect(Bounds());
+            SetDrawingMode(B_OP_COPY);  // Revert drawing mode safely
+        }
+    } else {
+        SetHighColor(systemBgColor); 
+        FillRect(updateRect); 
+    }
+
+
+    // --- BRANCH B: INLINE CHAT RENDERING ---
     float currentY = 10.0f; 
+    font_height fh;
+    GetFontHeight(&fh);
+    float fontAscent = fh.ascent;
 
     for (int32 i = 0; i < fLines.CountItems(); i++) {
         StyledLine* line = fLines.ItemAt(i);
@@ -732,8 +1007,6 @@ void CustomChatView::Draw(BRect updateRect) {
             BObjectList<StyledRunFragment, true>* row = line->wrappedRows.ItemAt(rowIdx);
             if (!row) continue;
 
-            // --- OPTIMIZATION CLIPPING PASSTHROUGH ---
-            // Only spend system cycles executing DrawString if the row lands within the visible updateRect bounds!
             if (currentY + fLineHeight >= updateRect.top && currentY <= updateRect.bottom) {
                 float currentX = 10.0f;
 
@@ -743,25 +1016,42 @@ void CustomChatView::Draw(BRect updateRect) {
 
                     SetFont(&(frag->font));
 
-                    rgb_color renderColor = frag->color;
-                    if ((renderColor.red == 255 && renderColor.green == 255 && renderColor.blue == 255) ||
-                        (renderColor.red == 0   && renderColor.green == 0   && renderColor.blue == 0)) {
-                        renderColor = systemTextColor;
+                    if (frag->type == FRAG_TEXT) {
+                        rgb_color renderColor = frag->color;
+                        if ((renderColor.red == 255 && renderColor.green == 255 && renderColor.blue == 255) ||
+                            (renderColor.red == 0   && renderColor.green == 0   && renderColor.blue == 0)) {
+                            renderColor = systemTextColor;
+                        }
+                        SetHighColor(renderColor);
+                        
+                        SetDrawingMode(B_OP_ALPHA);
+                        DrawString(frag->subText.String(), BPoint(currentX, currentY + fLineHeight - 2.0f));
+                        SetDrawingMode(B_OP_COPY);
+                        
+                        currentX += StringWidth(frag->subText.String());
+                    } 
+                    else if (frag->type == FRAG_ICON) {
+                        BRect iconRect(currentX, 
+                                       currentY + fLineHeight - fontAscent - 2.0f, 
+                                       currentX + fLineHeight, 
+                                       currentY + fLineHeight + fh.descent - 2.0f);
+                        
+                        if (frag->cachedBitmap != nullptr) {
+                            SetDrawingMode(B_OP_ALPHA);
+                            DrawBitmap(frag->cachedBitmap, iconRect);
+                            SetDrawingMode(B_OP_COPY);
+                        }
+                        currentX += frag->width + 2.0f;
                     }
-                    SetHighColor(renderColor);
-
-                    // Draw text row passing structural coordinate baseline parameters securely
-                    DrawString(frag->subText.String(), BPoint(currentX, currentY + fLineHeight - 2.0f));
-                    currentX += StringWidth(frag->subText.String());
                 }
             }
-
-            // Always increment your vertical step tracker sequentially for ALL matching room rows,
-            // regardless of clipping, so the absolute alignment matrix scales flawlessly!
             currentY += fLineHeight;
         }
     }
 }
+
+
+
 
 // Scoped layout mouse hover tracking engine for dynamic cursor feedback
 void CustomChatView::MouseMoved(BPoint point, uint32 transit, const BMessage* dragMessage) {
@@ -905,7 +1195,24 @@ void CustomChatView::MouseDown(BPoint point) {
 }
 
 
+void CustomChatView::SetBackgroundImage(const char* filePath)
+{
+    // Clean up any previously cached background asset to prevent memory leaks
+    delete fBackgroundBitmap;
+    fBackgroundBitmap = nullptr;
 
+    if (filePath != nullptr) {
+        // Automatically decode and load the image file format into RAM
+        fBackgroundBitmap = BTranslationUtils::GetBitmap(filePath);
+        
+        if (fBackgroundBitmap == nullptr) {
+            printf("[ERROR] Failed to load background image: %s\n", filePath);
+        }
+    }
+
+    // Force a full screen redraw pass to present the new background layout
+    Invalidate();
+}
 
 
 static void LogDebugStream(const char* serverName, const char* direction, const char* rawData, int32 dataLength) {
@@ -1525,6 +1832,38 @@ public:
 
         ServerConfig& srv = GetActiveConfig();
 
+        fBgPathInput = new BTextControl("bg_path", "Background Image:", srv.backgroundImagePath.c_str(), nullptr);
+        fBrowseBgBtn = new BButton("browse_bg", "Browse…", new BMessage('adbg'));
+        fFilePanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), nullptr, B_FILE_NODE, false);
+
+        fEnableEmoticonsCheck = new BCheckBox("enable_emotes", "Enable custom inline emoticons for this server", nullptr);
+        fEnableEmoticonsCheck->SetValue(srv.enableEmoticons ? B_CONTROL_ON : B_CONTROL_OFF);
+
+        // Instantiate the dimming slider control
+        fBgOpacitySlider = new BSlider("bg_opacity_sld", "Wallpaper Dimming Level:", nullptr, 0, 100, B_HORIZONTAL);
+        fBgOpacitySlider->SetValue(srv.backgroundOpacity);
+        fBgOpacitySlider->SetHashMarks(B_HASH_MARKS_BOTTOM);
+        fBgOpacitySlider->SetHashMarkCount(11); // Marks every 10%
+
+        fBgPathInput = new BTextControl("bg_path", "Background Image:", srv.backgroundImagePath.c_str(), nullptr);
+        fBrowseBgBtn = new BButton("browse_bg", "Browse…", new BMessage('adbg'));
+        fFilePanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), nullptr, B_FILE_NODE, false);
+
+        // Instantiate the toggle checkbox right below the background settings layout items
+        fEnableEmoticonsCheck = new BCheckBox("enable_emotes", "Enable custom inline emoticons for this server", nullptr);
+        fEnableEmoticonsCheck->SetValue(srv.enableEmoticons ? B_CONTROL_ON : B_CONTROL_OFF);
+
+
+        // Instantiate the text field tracking path locations
+        fBgPathInput = new BTextControl("bg_path", "Background Image:", srv.backgroundImagePath.c_str(), nullptr);
+        
+        // Instantiate the file panel trigger button firing message identifier 'adbg'
+        fBrowseBgBtn = new BButton("browse_bg", "Browse…", new BMessage('adbg'));
+        
+        // Modal file panel targeting this specific window instance context handler
+        fFilePanel = new BFilePanel(B_OPEN_PANEL, new BMessenger(this), nullptr, B_FILE_NODE, false);
+
+
         fNickInput = new BTextControl("nick", "Nickname:", srv.nick.c_str(), nullptr);
         
         // 1. Instantiate the input control blank initially
@@ -1569,9 +1908,9 @@ public:
 		fAltNickInput  = new BTextControl("altnick", "Alt Nick 1:", srv.altNick.c_str(), nullptr);
 		fAltNick2Input = new BTextControl("altnick2", "Alt Nick 2:", srv.altNick2.c_str(), nullptr);
 		
-		BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
-    		.SetInsets(15)
-    		.AddGrid(5.0f, 5.0f)
+        BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
+            .SetInsets(15)
+            .AddGrid(5.0f, 5.0f)
     		    // Row 0: Nickname
     			.Add(fNickInput->CreateLabelLayoutItem(), 0, 0)
     			.Add(fNickInput->CreateTextViewLayoutItem(), 1, 0)
@@ -1605,18 +1944,24 @@ public:
             	
             	.Add(fUserListFontMenu->CreateLabelLayoutItem(), 0, 8)
             	.Add(fUserListFontMenu->CreateMenuBarLayoutItem(), 1, 8)
-    	.End()
+                .Add(fBgPathInput->CreateLabelLayoutItem(), 0, 9)
+                .AddGroup(B_HORIZONTAL, 5, 1, 9)
+                    .Add(fBgPathInput->CreateTextViewLayoutItem(), 1.0)
+                    .Add(fBrowseBgBtn, 0.0)
+                .End()
+            .End()
             .Add(fAutoConnectCheck)
             .Add(fAutoReconnectCheck)
             .Add(fHideStatusCheck)
             .Add(fDebugEnableCheck)      
+            .Add(fEnableEmoticonsCheck) 
+            .Add(fBgOpacitySlider) 
             .AddGlue()
             .AddGroup(B_HORIZONTAL, 10)
                 .AddGlue()
                 .Add(cancelBtn)
                 .Add(saveBtn)
             .End();
-
     }
     
     
@@ -1624,7 +1969,29 @@ public:
     void MessageReceived(BMessage* message) override {
         switch (message->what) {
         	
+        	
+        	case 'adbg':
+                if (fFilePanel != nullptr) {
+                    fFilePanel->Show();
+                }
+                break;
+
+            case B_REFS_RECEIVED: {
+                // Fired automatically when an item is selected from Haiku's file browser panel
+                entry_ref ref;
+                if (message->FindRef("refs", &ref) == B_OK) {
+                    BEntry entry(&ref, true);
+                    BPath path;
+                    if (entry.GetPath(&path) == B_OK) {
+                        // Push the clean absolute path string right back into text display view
+                        fBgPathInput->SetText(path.Path());
+                    }
+                }
+                break;
+            }
+        	
             case 'cfcn':
+            	delete fFilePanel; 
                 Quit();
                 break;
                 
@@ -1642,7 +2009,9 @@ public:
                     srv.pass = inputPassword.String();
                 }         
                 
-                
+                srv.backgroundImagePath = fBgPathInput->Text();
+                srv.backgroundOpacity = fBgOpacitySlider->Value(); 
+                srv.enableEmoticons = (fEnableEmoticonsCheck->Value() == B_CONTROL_ON);
                 srv.pass = fPassInput->Text();
                 srv.autoConnect = (fAutoConnectCheck->Value() == B_CONTROL_ON);
                 srv.autoReconnect = (fAutoReconnectCheck->Value() == B_CONTROL_ON);
@@ -1669,7 +2038,7 @@ public:
 
                 BMessage updateNotify('mscf'); 
                 if (fParentWindow) fParentWindow->PostMessage(&updateNotify);
-            
+            	delete fFilePanel; 
                 Quit();
                 break;
             }
@@ -1698,7 +2067,11 @@ private:
     BMenuField*         fServerListFontMenu;
     BMenuField*         fChatLogFontMenu;
     BMenuField*         fUserListFontMenu;
-	
+    BTextControl*       fBgPathInput;
+    BButton*            fBrowseBgBtn;
+    BFilePanel*         fFilePanel;
+    BCheckBox*          fEnableEmoticonsCheck; 
+	BSlider*            fBgOpacitySlider; 
     // NEW: Safe helper function to fetch correct active reference target safely
     ServerConfig& GetActiveConfig() {
         if (fIsCustom && fServerIdx < cfg.customServers.size()) {
@@ -1790,8 +2163,54 @@ public:
         fChannelTree = new BOutlineListView("channel_tree");
         BScrollView* channelScroll = new BScrollView("scroll_channels", fChannelTree, 0, false, true);
         
-        // Create an Add Server button pinned to the sidebar
-        BButton* addServerButton = new BButton("add_srv_btn", "Add Server…", new BMessage('adcs')); 
+        // --- NEW COMPACT 4x4 EMOTICON GRID CONTAINER ---
+        // UPDATE: Store the instance address directly into your class member pointer
+        fEmoticonGrid = new BGridView();
+        BGridLayout* gridLayout = fEmoticonGrid->GridLayout();
+        
+        gridLayout->SetHorizontalSpacing(2.0f);
+        gridLayout->SetVerticalSpacing(2.0f);
+        gridLayout->SetInsets(2, 2, 2, 2);
+        struct EmoteButtonMap { const char* trigger; const uint8* iconData; const char* tooltip; };
+        EmoteButtonMap barEmotes[] = {
+            // Row 1: First 4 emoticons
+            {":)", kIconSmile, "Smile"},       {":(", kIconFrown, "Frown"},
+            {";)", kIconWink, "Wink"},         {":P", kIconTongue, "Tongue"},
+            // Row 2: Next 4 emoticons
+            {"lol", kIconLaughing, "Laughing"},{":O", kIconAstonished, "Shocked"},
+            {"<3", kIconHeart, "Heart"},       {":|", kIconConfused, "Confused"}
+        };
+
+        // Loop through and position each button precisely inside the grid coordinates
+        for (int32 i = 0; i < 8; i++) {
+            BMessage* clickMsg = new BMessage('emcl');
+            clickMsg->AddString("trigger", barEmotes[i].trigger);
+
+            BButton* btn = new BButton(barEmotes[i].trigger, "", clickMsg);
+            
+            // Render the vector graphic directly onto the button face
+            BBitmap* btnIcon = new BBitmap(BRect(0, 0, 15, 15), B_RGBA32);
+            if (BIconUtils::GetVectorIcon(barEmotes[i].iconData, 1024, btnIcon) == B_OK) {
+                btn->SetIcon(btnIcon);
+            }
+            delete btnIcon;
+
+            btn->SetFlat(true);
+            btn->SetToolTip(barEmotes[i].tooltip);
+            
+            // Fixed cell sizing matches standard flat square layout specs
+            btn->SetExplicitPreferredSize(BSize(22, 22));
+            btn->SetTarget(this);
+
+            // Matrix Mapping: Row calculation = (i / 4), Column calculation = (i % 4)
+            int32 column = i % 4;
+            int32 row = i / 4;
+            
+            // AddView(view, column, row, columnSpan, rowSpan)
+            gridLayout->AddView(btn, column, row, 1, 1);
+        }
+        // --- END OF GRID SELECTION SETUP ---
+
         
         // 2. Load Config and Populate Servers Tree ONCE
         load_config(); 
@@ -1871,27 +2290,27 @@ public:
         fTopicView->SetFont(&initialFont);
         fTopicView->TextView()->SetFontAndColor(&initialFont, B_FONT_SIZE);
 
-        // 5. Layout Architecture using Adjustable Split Panes
+       // 5. Layout Architecture using Adjustable Split Panes
         BSplitView* mainSplitter = new BSplitView(B_HORIZONTAL, 5.0f);
         
-        // Build a vertical stack container for the center chat area (Topic + Container Box)
         BView* centerStackView = BLayoutBuilder::Group<>(B_VERTICAL, 5)
-            .Add(fTopicView, 0.0)         // Topic row stays fixed at the top
-            .Add(fChatContainer, 1.0)     // Container tracks our dynamically swapped logs!
+            .Add(fTopicView, 0.0)         
+            .Add(fChatContainer, 1.0)     
             .View();
 
-        mainSplitter->AddChild(channelScroll, 0.16f);  // Left column weight (16%)
-        mainSplitter->AddChild(centerStackView, 0.73f); // Center column weight (73%)
-        mainSplitter->AddChild(userScroll, 0.11f);     // Right column weight (11%)
+        mainSplitter->AddChild(channelScroll, 0.16f);  
+        mainSplitter->AddChild(centerStackView, 0.73f); 
+        mainSplitter->AddChild(userScroll, 0.11f);     
 
         channelScroll->SetExplicitPreferredSize(BSize(130, B_SIZE_UNLIMITED)); 
         userScroll->SetExplicitPreferredSize(BSize(110, B_SIZE_UNLIMITED));    
 
+        // Place the 2-row fEmoticonGrid into your bottom toolbar builder
         BLayoutBuilder::Group<>(this, B_VERTICAL, 5)
             .SetInsets(10)
             .Add(mainSplitter, 1.0) 
             .AddGroup(B_HORIZONTAL, 5, 0.0) 
-                .Add(addServerButton, 0.0)   
+                .Add(fEmoticonGrid, 0.0)    // UPDATE: Placed your tracked member view cleanly here
                 .Add(fInputControl, 1.0)     
                 .Add(fConnectButton, 0.0)    
             .End();
@@ -1949,18 +2368,58 @@ void Show()
     // 1. Allow the base Haiku window engine to map layout sub-containers first
     BWindow::Show();
 
-    // 2. Trigger the high-performance engine swap pass after the initial draw cycle
-    if (cfg.useCustomDrawFunction) {
-        if (cfg.debugEnable) {
-            printf("[DEBUG] Window visible. Triggering deferred high-performance engine pass.\n");
+    // 2. DYNAMIC BACKGROUND INITIALIZATION ON BOOT
+    if (fCustomChatLog != nullptr) {
+        std::string targetServerName = "";
+
+        // If a server is actively highlighted on launch, grab its name
+        if (fCurrentServerNode != nullptr) {
+            targetServerName = fCurrentServerNode->Text();
+        } 
+        // Fallback: If nothing is selected yet, default to the first server in the tree
+        else if (fChannelTree != nullptr && fChannelTree->CountItems() > 0) {
+            ServerTreeItem* firstServer = dynamic_cast<ServerTreeItem*>(fChannelTree->ItemAt(0));
+            if (firstServer != nullptr) {
+                targetServerName = firstServer->Text();
+            }
         }
 
+        // Apply background matching configurations
+        if (!targetServerName.empty()) {
+            bool found = false;
+            for (size_t i = 0; i < cfg.servers.size(); i++) {
+                if (cfg.servers[i].name == targetServerName) {
+                    if (!cfg.servers[i].backgroundImagePath.empty()) {
+                        fCustomChatLog->SetBackgroundImage(cfg.servers[i].backgroundImagePath.c_str());
+                        fCustomChatLog->SetBackgroundDimming(cfg.servers[i].backgroundOpacity);
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                for (size_t i = 0; i < cfg.customServers.size(); i++) {
+                    if (cfg.customServers[i].name == targetServerName) {
+                        if (!cfg.customServers[i].backgroundImagePath.empty()) {
+                            fCustomChatLog->SetBackgroundImage(cfg.customServers[i].backgroundImagePath.c_str());
+                            fCustomChatLog->SetBackgroundDimming(cfg.customServers[i].backgroundOpacity);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Trigger the high-performance engine swap pass after the initial draw cycle
+    if (cfg.useCustomDrawFunction) {
         BMessage initDrawMsg(MSG_TOGGLE_CUSTOM_DRAW);
-        initDrawMsg.AddBool("initial_boot_pass", true); // Guard flag prevents state flipping
-        
+        initDrawMsg.AddBool("initial_boot_pass", true);
         this->PostMessage(&initDrawMsg);
     }
 }
+
+
 
 
 
@@ -2275,16 +2734,18 @@ void ShowContextMenu(BPoint screenPoint, BListItem* item) {
         configMsg->AddPointer("server_item", srvItem);
         menu->AddItem(new BMenuItem("Configure Server...", configMsg));
         
+        
         // Channel List Option
         menu->AddSeparatorItem();
         BMessage* listMsg = new BMessage(MSG_CONTEXT_CHAN_LIST);
         listMsg->AddPointer("server_item", srvItem);
         menu->AddItem(new BMenuItem("Channel List", listMsg));
         
-        // About Option
+        // Put Add Server Here 
         menu->AddSeparatorItem();
-        BMessage* aboutMsg = new BMessage(MSG_CONTEXT_ABOUT);
-        menu->AddItem(new BMenuItem("About...", aboutMsg));
+        BMessage* addSrvMsg = new BMessage('adcs'); // Reuses your original button message identifier
+        menu->AddItem(new BMenuItem("Add Server…", addSrvMsg));
+        
 
         if (srvItem->IsCustom()) {
             menu->AddSeparatorItem();
@@ -2292,6 +2753,12 @@ void ShowContextMenu(BPoint screenPoint, BListItem* item) {
             deleteMsg->AddPointer("server_item", srvItem);
             menu->AddItem(new BMenuItem("Delete Custom Server", deleteMsg));
         }
+        
+        
+            // About Option
+        menu->AddSeparatorItem();
+        BMessage* aboutMsg = new BMessage(MSG_CONTEXT_ABOUT);
+        menu->AddItem(new BMenuItem("About...", aboutMsg));    
         
         menu->SetTargetForItems(this);
         menu->Go(screenPoint, true, true, true);
@@ -3918,7 +4385,45 @@ public:
         switch (message->what) {
 
 
-        // 2. PRIVATE QUERY EXECUTOR: Opens a new chat session branch for one-on-one chats
+        case 'emcl': {
+            const char* triggerText;
+            if (message->FindString("trigger", &triggerText) == B_OK) {
+                BTextView* textView = fInputControl->TextView();
+                if (textView == nullptr) break;
+
+                int32 textLen = textView->TextLength();
+                
+                // Keep typing continuous by forcing focus to the input field first
+                fInputControl->MakeFocus(true);
+                
+                // 1. Move cursor to the absolute end of the message text string
+                textView->Select(textLen, textLen);
+                
+                // 2. Add a leading space if we aren't at the start of an empty line
+                if (textLen > 0) {
+                    BString currentText = fInputControl->Text();
+                    if (!currentText.EndsWith(" ")) {
+                        textView->Insert(" ");
+                    }
+                }
+                
+                // 3. Insert the exact emoticon trigger text shortcut string
+                textView->Insert(triggerText);
+                
+                // 4. CRITICAL FIX: Insert a real space character via the text view API.
+                // This forces the Interface Kit to flag the control as fully updated.
+                textView->Insert(" ");
+                
+                // 5. Ensure the input view follows the text growth bounds
+                textView->ScrollToSelection();
+            }
+            break;
+        }
+
+
+
+
+        // PRIVATE QUERY EXECUTOR: Opens a new chat session branch for one-on-one chats
         case MSG_CONTEXT_PRIVMSG: {
             BString targetNick;
             if (message->FindString("target_nick", &targetNick) == B_OK && targetNick.Length() > 0) {
@@ -4150,6 +4655,24 @@ public:
 				fCustomChatLog->SetExplicitMaxSize(BSize(B_SIZE_UNSET, B_SIZE_UNSET));
 				fCustomChatLog->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, B_SIZE_UNSET));
 				fCustomChatLog->ClearAllLines();
+
+				// --- FIX: FORCE BACKGROUND SYNC ON ENGINE INITIALIZATION ---
+				// Ensure the unique server background is explicitly re-bound to this specific engine pass
+				if (fCurrentServerNode != nullptr) {
+					std::string activeServerName = fCurrentServerNode->Text(); 
+					for (size_t i = 0; i < cfg.servers.size(); i++) {
+						if (cfg.servers[i].name == activeServerName) {
+							std::string initialBg = cfg.servers[i].backgroundImagePath;
+							int32 initialDim = cfg.servers[i].backgroundOpacity;
+							
+							if (!initialBg.empty()) {
+								fCustomChatLog->SetBackgroundImage(initialBg.c_str());
+								fCustomChatLog->SetBackgroundDimming(initialDim);
+							}
+							break;
+						}
+					}
+				}
 			}
 
 			this->RebuildActiveChannelBuffer();
@@ -4158,6 +4681,7 @@ public:
 			this->InvalidateLayout(true);
 			break;
 		}
+
 
 
 
@@ -4483,7 +5007,6 @@ public:
         fChatLog->SetFont(&chatFont);
 
         // Tell the text view to smoothly scale all characters to the new size in-place
-        // Passing B_FONT_SIZE leaves your parsed colors, bold nicknames, and underscores entirely intact!
         fChatLog->SetFontAndColor(&chatFont, B_FONT_SIZE); 
         fChatLog->Invalidate();
 
@@ -4505,8 +5028,31 @@ public:
 
         // --- STEP 5: Live Resize and Recalculate Custom Draw Engine Layout Geometry ---
         if (fCustomChatLog != nullptr) {
-            // Adjust row pacing step to comfortably accommodate the larger tracking font
             fCustomChatLog->SetLineHeight(cfg.chatLogFontSize + 4.0f);
+            
+            std::string bgPath = "";
+            int32 dimmingLevel = 30;
+            size_t activeIdx = (size_t)selectedConfig;
+            
+            if (activeIdx < cfg.servers.size()) {
+                bgPath = cfg.servers[activeIdx].backgroundImagePath;
+                dimmingLevel = cfg.servers[activeIdx].backgroundOpacity; // <-- EXTRACTED
+            } else {
+                size_t customIdx = activeIdx - cfg.servers.size();
+                if (customIdx < cfg.customServers.size()) {
+                    bgPath = cfg.customServers[customIdx].backgroundImagePath;
+                    dimmingLevel = cfg.customServers[customIdx].backgroundOpacity; // <-- EXTRACTED
+                }
+            }
+
+            if (bgPath.empty()) {
+                fCustomChatLog->SetBackgroundImage(nullptr);
+            } else {
+                fCustomChatLog->SetBackgroundImage(bgPath.c_str());
+            }
+
+            // Push the dimming slider changes down directly into the graphics card buffer loop
+            fCustomChatLog->SetBackgroundDimming(dimmingLevel);
             
             // Force the word-wrapping coordinates to recalculate matching the new scale ---
             fCustomChatLog->RecalculateAllLineWraps();
@@ -4514,15 +5060,11 @@ public:
             // Forces the app server to trigger CustomChatView::Draw instantly
             fCustomChatLog->Invalidate();
         }
-        
-        // Re-sync layout structures window-wide
-        if (fChatContainer != nullptr) {
-            fChatContainer->InvalidateLayout(true);
-            fChatContainer->Invalidate();
-        }
+
 
         break;
     }
+
 
 
 
@@ -4842,39 +5384,73 @@ public:
 
 
         	
-           case 'slch': {
+        case 'slch': {
             int32 selectedIdx = fChannelTree->CurrentSelection();
             if (selectedIdx >= 0) {
-                BStringItem* selectedItem = dynamic_cast<BStringItem*>(fChannelTree->ItemAt(selectedIdx));
+                // Change the cast to generic BListItem first to preserve your custom object signatures
+                BListItem* rawItem = fChannelTree->ItemAt(selectedIdx);
+                BStringItem* selectedItem = dynamic_cast<BStringItem*>(rawItem);
+                
                 if (selectedItem != nullptr && selectedItem != fActiveBufferItem) {
                     
-                    // 1. Cache current chat history log text back to memory ONLY for vanilla BTextView
                     if (fActiveBufferItem != nullptr && !cfg.useCustomDrawFunction) {
                         fTextBuffers[fActiveBufferItem] = fChatLog->Text();
                     }
                     
                     fActiveBufferItem = selectedItem;
                     
-                    // === ABSOLUTE SERVER CONTEXT POINTER SYNCHRONIZATION ===
-                    BListItem* superItem = fChannelTree->Superitem(selectedItem);
+                    // === FIXED CONTEXT POINTER SYNCHRONIZATION ===
+                    BListItem* superItem = fChannelTree->Superitem(rawItem);
                     if (superItem != nullptr) {
                         ServerTreeItem* parentServer = dynamic_cast<ServerTreeItem*>(superItem);
                         if (parentServer != nullptr) {
-                            fCurrentServerNode = parentServer; // Sync active network context pointer instantly!
+                            fCurrentServerNode = parentServer;
                         }
                     } else {
-                        // If there is no superitem, the user clicked on the root Server folder node itself
-                        ServerTreeItem* clickedServer = dynamic_cast<ServerTreeItem*>(selectedItem);
+                        ServerTreeItem* clickedServer = dynamic_cast<ServerTreeItem*>(rawItem);
                         if (clickedServer != nullptr) {
                             fCurrentServerNode = clickedServer;
                         }
                     }
                     // =========================================================================
                     
+                    // === DYNAMIC BACKGROUND SEPARATION PASS ===
+                    if (fCustomChatLog != nullptr && fCurrentServerNode != nullptr) {
+                        // Securely read the name via our verified ServerTreeItem cast target
+                        BString currentServerName(fCurrentServerNode->Text());
+                        bool bgFound = false;
+
+                        // 1. Check primary/standard servers list
+                        for (const auto& srv : cfg.servers) {
+                            if (BString(srv.name.c_str()) == currentServerName) {
+                                fCustomChatLog->SetBackgroundImage(srv.backgroundImagePath.c_str());
+                                fCustomChatLog->SetBackgroundDimming(srv.backgroundOpacity);
+                                bgFound = true;
+                                break;
+                            }
+                        }
+
+                        // 2. Fallback to user-defined custom server profiles
+                        if (!bgFound) {
+                            for (const auto& srv : cfg.customServers) {
+                                if (BString(srv.name.c_str()) == currentServerName) {
+                                    fCustomChatLog->SetBackgroundImage(srv.backgroundImagePath.c_str());
+                                    fCustomChatLog->SetBackgroundDimming(srv.backgroundOpacity);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        fCustomChatLog->Invalidate();
+                    }
+
+                    // =========================================================================
+
                     // Explicitly sync workspace visibility constraints down to Custom Canvas
                     if (fCustomChatLog != nullptr) {
                         fCustomChatLog->SetActiveChannel(fActiveBufferItem);
                     }
+
                     
                     // ACTION RESET: Check if the clicked item is a custom channel leaf node
                     ChannelTreeItem* chanItem = dynamic_cast<ChannelTreeItem*>(selectedItem);
@@ -4955,6 +5531,39 @@ public:
                         }
                     }
                     
+                    // --- NEW: DYNAMIC PICKER PANEL TOOLBAR SYNCHRONIZATION ---
+                    if (fEmoticonGrid != nullptr && fCurrentServerNode != nullptr) {
+                        bool emotesActive = true;
+                        BString currentServerName(fCurrentServerNode->Text());
+
+                        // Scan through standard configurations for a profile name match
+                        for (const auto& srv : cfg.servers) {
+                            if (BString(srv.name.c_str()) == currentServerName) {
+                                emotesActive = srv.enableEmoticons;
+                                break;
+                            }
+                        }
+
+                        // Scan through user-defined custom server profiles if no standard match was found
+                        for (const auto& srv : cfg.customServers) {
+                            if (BString(srv.name.c_str()) == currentServerName) {
+                                emotesActive = srv.enableEmoticons;
+                                break;
+                            }
+                        }
+
+                        // Toggle visibility of the 4x4 picker group matrix instantly
+                        if (emotesActive) {
+                            fEmoticonGrid->Show();
+                        } else {
+                            fEmoticonGrid->Hide();
+                        }
+
+                        // Force layout engine to re-flow text controls over collapsed areas
+                        this->InvalidateLayout(true);
+                    }
+                    // --- END OF PICKER PANEL RE-FLOW PATCH ---
+                    
                     // Force the standard scrollbar viewport directly back down to the bottom
                     if (!cfg.useCustomDrawFunction) {
                         int32 newLength = fChatLog->TextLength();
@@ -4967,6 +5576,7 @@ public:
             }
             break;
         }
+
 
 
 
@@ -5203,15 +5813,6 @@ public:
 
 
 
-
-
-
-
-
-
-
-
-
         case MSG_IRC_RECEIVED: {
             BString rawLine;
             // 1. Intercept incoming raw text payload line
@@ -5290,7 +5891,8 @@ private:
     BView*           fChatContainer; 
     CustomChatView*  fCustomChatLog; 
     bool fIsLoadingHistory = false; 
-	
+	BGridView*    fEmoticonGrid;
+
 }; 
 
 class HIRC : public BApplication {

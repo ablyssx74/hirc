@@ -2,7 +2,7 @@
 TARGET = hirc
 PACKAGE_DIR := build/package
 NAME = hirc
-VERSION = 0.0.7
+VERSION = 0.0.8
 
 # Target Arch
 UNAME_M := $(shell uname -p)
@@ -22,13 +22,13 @@ INCLUDE = -L/boot/system/lib
 endif
 
 # Source files, objects, and resources
-SRCS = hirc.cpp
+SRCS = hirc.cpp icons.cpp
 OBJS = $(SRCS:.cpp=.o)
 RDEFS = hirc.rdef
 RSRCS = $(RDEFS:.rdef=.rsrc)
 
 # Haiku specific libraries
-LIBS = -lbe -lnetwork -lnetservices -lbnetapi -lshared
+LIBS = -lbe -lnetwork -lnetservices -lbnetapi -lshared -ltranslation -ltracker
 
 # Default target
 all: $(TARGET)
